@@ -1,0 +1,45 @@
+{
+  "roles": {
+    "baseten": {
+      "Planner": 16000,
+      "Chat": 8000,
+      "Product": 8000
+    },
+    "meta": {
+      "Builder": 8000,
+      "Work": 8000,
+      "Chat": 8000,
+      "Product": 8000
+    },
+    "modal_llm": {
+      "Planner": 16000,
+      "Product": 8000
+    }
+  },
+  "model_caps": {
+    "meta-models/muse-spark-open-1026": 24000,
+    "muse-spark-1.3": 131072,
+    "muse-spark-1.3-contributor": 131072
+  },
+  "default_reasoning_effort": "high",
+  "reasoning_output_limits": {
+    "minimal": 8000,
+    "low": 8000,
+    "medium": 12000,
+    "high": 16000,
+    "xhigh": 24000
+  },
+  "capabilities": {
+    "baseten_tools": true,
+    "baseten_reasoning": true,
+    "modal_llm_reasoning": false,
+    "modal_llm_tools": false
+  },
+  "unknown_model_cap": 4096,
+  "max_continuations": 3,
+  "notes": "Baseten 24000-token request cap, native tool call and reasoning_effort=high were accepted in one real probe. This is a conservative supported request size, not an advertised maximum. Meta 1.3 cap follows official coding-agent documentation. User selections are authoritative; complexity and phase never override them. Unknown models use a conservative cap until configured. Modal shared endpoint tools/reasoning are unverified: JSON orchestration fallback, omit reasoning_effort, unknown endpoint output cap 4096 until verified.",
+  "sources": [
+    "https://docs.baseten.co/reference/inference-api/chat-completions",
+    "https://dev.meta.ai/docs/quickstart"
+  ]
+}

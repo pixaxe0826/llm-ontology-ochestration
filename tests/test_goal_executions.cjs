@@ -1,0 +1,10 @@
+'use strict';
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
+const view=require('../workbench/static/goal-executions.js');
+const context={goal_id:'g',plan_item_id:'p',task_id:'t',goal_title:'Goal',item_title:'Render',status:'linked'};
+const entries=[{kind:'goal',id:'g',record:{id:'g'}},{kind:'task',id:'t',record:{goal_context:context}},{kind:'gpu',id:'j',record:{goal_context:context}},{kind:'gpu',id:'manual',record:{}},{kind:'task',id:'chat',record:{}}];
+const original=JSON.stringify(entries);assert.deepEqual(view.top(entries,[{id:'g'}],false).map(e=>e.id),['g','manual','chat']);assert.equal(view.top(entries,[{id:'g'}],true).length,5);assert.deepEqual(view.children(entries,'g').map(e=>e.id),['t','j']);assert.equal(JSON.stringify(entries),original);
+assert.equal(view.top(entries,[],false).length,5);assert.equal(view.context({goal_context:{...context,status:'conflict'}}),null);assert.deepEqual(view.breadcrumb(context),['Goal','Render']);
+const detail={execution:{entries:[{id:'2',plan_item_id:'p',time:20},{id:'1',plan_item_id:'p',time:10},{id:'3',plan_item_id:'q',time:1}]}};assert.deepEqual(view.runs(detail,'p').map(r=>r.id),['1','2']);assert.equal(view.runs(detail).length,3);assert.equal(view.duration(null),'시간 미확인');assert.equal(view.duration(150),'2분 30초');
+const html=fs.readFileSync(path.join(__dirname,'../workbench/static/index.html'),'utf8');assert.ok(html.includes('data-show-goal-tasks'));assert.ok(html.includes('id="goal-gpu-all"'));assert.ok(html.includes('id="goal-runs-dialog"'));
+console.log('PASS: Goal history default grouping/toggle, direct records, orphan visibility, read-only filtering, per-item chronological runs and breadcrumbs');

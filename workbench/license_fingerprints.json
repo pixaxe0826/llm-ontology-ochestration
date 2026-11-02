@@ -1,0 +1,29 @@
+{
+  "Apache-2.0": {
+    "start": "TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION",
+    "end": "END OF TERMS AND CONDITIONS",
+    "sha256": "f2169aeff3b3260f2bb7d61f63699b457d60ede26ddc94566db4b88dd6bd26bc",
+    "source": "https://raw.githubusercontent.com/spdx/license-list-data/main/json/details/Apache-2.0.json",
+    "variants": [
+      {
+        "start": "Licensed under the Apache License",
+        "end": "limitations under the License.",
+        "sha256": "d39939c35ea12350320a4a4030577606912b138b59455ec554897ca594d02e84",
+        "source": "https://raw.githubusercontent.com/spdx/license-list-data/main/json/details/Apache-2.0.json",
+        "type": "standard_header"
+      }
+    ]
+  },
+  "MIT": {
+    "start": "Permission is hereby granted",
+    "end": "SOFTWARE.",
+    "sha256": "81a61d35f6891e560d80c95e831624d3270eb7ccf5f492522851169cb355ddab",
+    "source": "https://raw.githubusercontent.com/spdx/license-list-data/main/json/details/MIT.json"
+  },
+  "BSD-3-Clause": {
+    "start": "Redistribution and use",
+    "end": "SUCH DAMAGE.",
+    "sha256": "efb4863361df74d33da13e27f030067844f7b8bad1115f1d2f9ad6bb870370c6",
+    "source": "https://raw.githubusercontent.com/spdx/license-list-data/main/json/details/BSD-3-Clause.json"
+  }
+}

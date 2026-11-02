@@ -1,0 +1,62 @@
+{
+  "label": "추정 USD · 토큰 단가는 사용자 지정 기본값, GPU는 Modal 공개 단가 기준",
+  "reference_date": "2026-10-31",
+  "sam": {"usd_per_thousand_images": 2.50, "label": "추정 USD · SAM 이미지 1,000장당", "source": "https://dev.meta.ai/models/sam-3-1", "reference_date": "2026-11-01"},
+  "web_search": {"meta_usd_per_query": 0.0025, "label": "추정 USD · 검색 요청당; 토큰 비용 별도", "source": "https://dev.meta.ai/docs/pricing-rate-limits", "reference_date": "2026-11-01"},
+  "timezone": "America/New_York",
+  "gpu_source": "https://modal.com/pricing",
+  "tokens_per_million": {
+    "baseten": {
+      "input": 1.25,
+      "cached_input": 0.15,
+      "output": 4.25
+    },
+    "meta": {
+      "input": 1.25,
+      "cached_input": 0.15,
+      "output": 4.25
+    },
+    "meta_contributor": {
+      "input": 0.1,
+      "cached_input": 0.002,
+      "output": 0.2
+    },
+    "modal_llm": {
+      "input": 1.25,
+      "cached_input": 0.15,
+      "output": 4.25
+    }
+  },
+  "gpu_hourly": {
+    "T4": 0.5904,
+    "L4": 0.7992,
+    "A10": 1.1016,
+    "L40S": 1.9512,
+    "A100": 2.0988,
+    "A100-80GB": 2.4984,
+    "H100": 3.9492,
+    "H200": 4.5396,
+    "B200": 6.2496,
+    "B300": 7.0992
+  },
+  "limits": {
+    "baseten": {
+      "total": 100,
+      "daily": null,
+      "reserve": 45
+    },
+    "meta": {
+      "total": 150,
+      "daily": null
+    },
+    "modal": {
+      "total": 100,
+      "daily": null,
+      "llm": 30
+    }
+  },
+  "max_output_tokens": 4096,
+  "gpu_exclusions": "CPU, memory, storage, network and build charges are excluded; this is not the Modal invoice.",
+  "modal_llm_source": "https://modal.com/docs/guide/supported-models",
+  "modal_llm_note": "Shared Endpoint Muse Spark Open token prices; estimated USD, not the Modal invoice."
+}

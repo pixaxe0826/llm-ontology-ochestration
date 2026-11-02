@@ -1,0 +1,25 @@
+// Pure formatting checks. Does not create a browser or call a service.
+const fs=require('node:fs');
+const vm=require('node:vm');
+const assert=require('node:assert/strict');
+const source=fs.readFileSync(require('node:path').join(__dirname,'../workbench/static/markdown-export.js'),'utf8');
+const output=vm.runInNewContext(source+'\nMarkdownExport');
+const answer='# 제목\n\n**전체 응답**\n\n```python\nprint("ok")\n```\n'+('긴 응답 '.repeat(5000));
+const record={id:'offline',title:'내 대화',provider:'baseten',model:'meta-models/muse-spark-open-1026',status:'succeeded',events:[{kind:'user',text:'질문'},{kind:'assistant',text:answer,sources:[{title:'측정값',chat_id:'source',message_id:'message'}]},{kind:'tool_result',name:'run_command',result:{output:'```\n로그'}}]};
+assert.ok(output.task(record).includes(answer));
+assert.ok(output.response(record.events[1]).includes(answer));
+assert.ok(output.task(record).includes('기억1: 측정값'));
+assert.ok(output.task(record).includes('````json'));
+assert.ok(output.job({id:'job',spec:{gpu:'T4',program:'python',entry:'run.py'},status:'succeeded',logs:'actual output',result:{exit_code:0},artifacts:['metrics.json']}).includes('actual output'));
+assert.equal(output.filename('a/b:c*?'),'a_b_c__.md');
+const objective='\n# GOAL — Raw objective\n\n## Details\n- Keep this exactly.\n\n';
+const goal={id:'goal',title:'Short title',objective,summary:'Observed progress.'};
+const exported=output.goal({goal,messages:[]});
+assert.equal(exported.split('\n')[0],'# Short title');
+assert.ok(exported.startsWith('# Short title\n\n'+objective));
+assert.equal(output.goal({goal:{objective},messages:[]}).split('\n')[0],'# GOAL — Raw objective');
+assert.equal(output.suggestGoalTitle('```python\n# comment\n```\n### Real title ###'),'Real title');
+assert.equal(output.suggestGoalTitle('plain text',false),'');
+assert.equal(output.suggestGoalTitle('# '+'x'.repeat(150)).length,120);
+console.log('PASS: Full Markdown, long response, citations, code fences, GPU logs, safe filename');
+console.log('PASS: Goal title, raw objective prefix, legacy heading, fenced-code exclusion, 120-character limit');

@@ -1,0 +1,13 @@
+.venv/
+.env
+*.key
+__pycache__/
+*.pyc
+
+.workbench/
+
+references/
+.env.*
+*.pem
+*.p12
+*.pfx

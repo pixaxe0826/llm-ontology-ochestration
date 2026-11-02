@@ -1,0 +1,9 @@
+{
+  "timing": true,
+  "request_snapshot": true,
+  "response_cache": true,
+  "compact_lists": true,
+  "conditional_get": true,
+  "gzip": true,
+  "ui_poll_ms": 3000
+}
