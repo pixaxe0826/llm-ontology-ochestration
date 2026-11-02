@@ -535,7 +535,7 @@ class GoalManager(GoalSettings,GoalReviews,GoalFiles,GoalDecisions,GoalScheduler
             'acceptance_rules':i.get('acceptance_rules',{}),
             **{k:i.get(k) for k in ('depends_on','blocked_by_decision','priority','provisional_scope','provisional_decisions','bundles','wait_reason')},
             'dependency_state':self.dependency_view(goal,i)['dependency_state']} for i in self.items(goal['id'])]
-        recent=[{k:m[k] for k in ('from','to','type','body','evidence_refs')} for m in self.messages(goal['id']) if not m.get('directive_id')][-6:]
+        recent=[{**{k:m[k] for k in ('from','to','type','body')},'evidence_refs':m.get('evidence_refs',m.get('evidence',[])) or []} for m in self.messages(goal['id']) if not m.get('directive_id')][-6:]
         for m in recent:m['body']=m['body'][-3000:]
         compact_item=None if item is None else {k:v for k,v in item.items() if k in ('id','title','parent','acceptance','acceptance_rules','status','role','attempts','reworks','bundles','defects','report','instruction','rerun_instruction','rerun_requirement','depends_on','blocked_by_decision','provisional','provisional_decisions','wait_reason','review_trigger','split_item_ids','files_to_read','files_to_write','commands_to_run','stalled_chunks','document_cycle_active','document_cycles_used','document_cycle_paths','document_cycle_execution_criteria','gpu_artifact_requirement','superseded_by','superseded_reason')}
         if compact_item is not None:compact_item['bundle_limit']=self.bundle_limit(item)

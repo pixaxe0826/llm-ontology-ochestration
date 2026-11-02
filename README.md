@@ -29,7 +29,7 @@ powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\scripts\set_base
 - Baseten 모델은 `meta-models/muse-spark-open-1026`으로 고정됩니다.
 - 완료·superseded 항목은 계획 슬롯을 쓰지 않으며, superseded는 수용 완료와 구분됩니다.
 - GPU 결과 회수 근거는 제출한 입력 파일의 현재 해시도 검사합니다.
-- 오프라인 회귀 검사: Python 708개와 JavaScript 5개 묶음 PASS. 공급자·GPU 실호출 테스트는 별도입니다.
+- 오프라인 회귀 검사: Python 710개와 JavaScript 5개 묶음 PASS. 공급자·GPU 실호출 테스트는 별도입니다.
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"

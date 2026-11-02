@@ -108,3 +108,15 @@ class SupersededTests(unittest.TestCase):
         value={'items':[{'key':'small-child','title':'Small implementation','acceptance':['Result file exists'],'files_to_read':[],'files_to_write':['result.py'],'commands_to_run':[],'depends_on':[],'blocked_by_decision':[]}],'summary':'One small implementation child'}
         with patch.object(self.manager,'inbox_phase',return_value=(json.dumps(value),[])) as planner:self.assertTrue(self.manager.shrink_stalled_item(goal,a))
         self.assertEqual(planner.call_count,1);self.assertEqual(len(self.manager.items(goal['id'])),4);self.assertEqual(active_count(self.manager.items(goal['id'])),2)
+
+    def test_maintenance_note_without_evidence_refs_does_not_break_builder_or_planner_context(self):
+        item=self.items('recovery')[0]
+        row=self.store.save('message',{'goal_id':self.goal['id'],'plan_item_id':item['id'],'from':'System','to':'Human','type':'NOTE','body':'Approved maintenance kept all work.','evidence':['maintenance-audit'],'created':1})
+        for role in ('Builder','Planner'):
+            context=self.manager.context(self.goal,item,role);self.assertIn('maintenance-audit',json.dumps(context))
+        self.assertEqual(self.store.get('message',row['id']),row);self.assertEqual(self.providers.calls,[])
+    def test_optional_message_evidence_defaults_empty_preserves_canonical_references(self):
+        item=self.items('recovery')[0]
+        for refs in ({},{'evidence_refs':None},{'evidence_refs':['canonical-evidence']}):
+            self.store.save('message',{'goal_id':self.goal['id'],'from':'System','to':'Human','type':'NOTE','body':'Stored note','created':1,**refs})
+        context=self.manager.context(self.goal,item,'Builder');self.assertIn('canonical-evidence',json.dumps(context))
