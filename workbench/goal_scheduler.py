@@ -158,12 +158,12 @@ class GoalScheduler(GoalLiveness):
 
     @staticmethod
     def observed_report(task,evidence,declared):
-        return {**({'chunk_status':task['chunk_outcome']['status']} if task.get('chunk_outcome') else {}),'summary':declared['summary'][:1200],'report_status':declared['status'],'builder_verification':declared.get('verification','')[:2000],
+        return {'current_task_id':task.get('id'),'current_task_status':task.get('status'),'current_chunk_id':next((e.get('chunk_id') for e in reversed(task.get('events',[])) if e.get('kind')=='chunk_started'),None),'current_evidence_ids':[e['id'] for e in evidence if e.get('task_id')==task.get('id')],'prior_evidence_ids':[e['id'] for e in evidence if e.get('task_id')!=task.get('id')],**({'chunk_status':task['chunk_outcome']['status']} if task.get('chunk_outcome') else {}),'summary':declared['summary'][:1200],'report_status':declared['status'],'builder_verification':declared.get('verification','')[:2000],
             'changed_files':sorted({e['path'] for e in evidence if e['kind']=='change' and e.get('path')}),
-            'test_results':[{'kind':e['kind'],'result':'PASS: observed exit code 0.' if e.get('supports_acceptance',True) else 'FAIL/NOT VERIFIED: observed execution did not succeed.',
+            'test_results':[{'kind':e['kind'],'producer_task_id':e.get('task_id'),'origin':'current_task' if e.get('task_id')==task.get('id') else 'prior_task','result':'PASS: observed exit code 0.' if e.get('supports_acceptance',True) else 'FAIL/NOT VERIFIED: observed execution did not succeed.',
                 'execution':e.get('execution'),'evidence_path':e['id']} for e in evidence if e['kind'] in ('run_command','submit_gpu_job','get_gpu_job')],
             'evidence_paths':[e['id'] for e in evidence],
-            'verification':'Observed command/GPU results supplied.' if any(e['kind'] in ('run_command','submit_gpu_job','get_gpu_job') for e in evidence) else 'NOT RUN: command/GPU verification. NOT VERIFIED: execution outcome.'}
+            'verification':'Current task command/GPU results supplied; prior evidence is separately labelled.' if any(e.get('task_id')==task.get('id') and e['kind'] in ('run_command','submit_gpu_job','get_gpu_job') for e in evidence) else 'NOT RUN: command/GPU verification. NOT VERIFIED: execution outcome.'}
 
     def park_finished_batch(self,goal,item,task):
         evidence,_=self.collect_evidence(item,task);declared=self.batch_report(task);report=self.observed_report(task,evidence,declared)
@@ -182,6 +182,7 @@ class GoalScheduler(GoalLiveness):
             if self.child_items(goal,item):continue
             if item['status'] not in ('in_progress','waiting','waiting_children','todo','rework'):continue
             task=self.task_for_item(item);view=self.dependency_view(goal,item)
+            if task and self.retry_restart_chunk(goal,item,task):continue
             if task and task['id'] in self.builders.active:
                 if task['status']=='waiting_approval' and item['status']!='waiting':self.park_item(item,'approval',resume='active_task')
                 elif task['status']=='queued' and item['status']!='waiting':self.park_item(item,'builder_queue',resume='active_task')
@@ -220,6 +221,7 @@ class GoalScheduler(GoalLiveness):
         return False
 
     def candidate_ready(self,goal,item):
+        if item.get('review_only_next'):return False
         if terminal(item):return False
         if self.child_items(goal,item):return False
         if self.long_commands.active(goal['id'],item['id']) or self.live_gpu_jobs(goal,item):return False

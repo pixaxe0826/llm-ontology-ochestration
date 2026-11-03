@@ -16,6 +16,15 @@ def register_secret(value):
         _ephemeral.add(value)
 
 
+def provider_key_name(name):
+    return name=='OPENAI_API_KEY' or bool(re.fullmatch(r'MUSE_PROVIDER_[A-Z][A-Z0-9_]{0,39}_API_KEY',name))
+
+
+def secret_values():
+    with _secret_lock:
+        return [*list(_ephemeral),*[value for name,value in os.environ.items() if value and (name in KEY_NAMES or provider_key_name(name))]]
+
+
 def refresh_keys():
     if os.name == "nt":
         import winreg
@@ -28,25 +37,24 @@ def refresh_keys():
                             os.environ[name] = value
                     except FileNotFoundError:
                         pass
+                index=0
+                while True:
+                    try:name,value,_=winreg.EnumValue(key,index);index+=1
+                    except OSError:break
+                    if provider_key_name(name) and isinstance(value,str) and value:os.environ[name]=value
         except OSError:
             pass
 
 
 def redact(value):
     text = str(value)
-    with _secret_lock:
-        for secret in _ephemeral:
-            text = text.replace(secret, '[REDACTED]')
-    for name in KEY_NAMES:
-        key = os.environ.get(name, "")
-        if key:
-            text = text.replace(key, "[REDACTED]")
+    for secret in secret_values():
+        if secret:text=text.replace(secret,'[REDACTED]')
     return re.sub(r"(?i)(Bearer\s+)[\w.\-]{16,}", r"\1[REDACTED]", text)
 
 
 def contains_key(text):
-    with _secret_lock:
-        return any(secret in text for secret in _ephemeral) or any(os.environ.get(name) and os.environ[name] in text for name in KEY_NAMES)
+    return any(secret in text for secret in secret_values() if secret)
 
 
 def clean_data(data):

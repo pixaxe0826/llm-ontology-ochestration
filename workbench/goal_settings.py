@@ -19,6 +19,9 @@ from .human_briefs import display_language
 FIELDS={'human_display_language','output_language','timezone','builder_model','reasoning','budgets','policy','deadline','allow_provisional','reference_limits','unattended','gpu_jobs_per_cycle','reference_page_limits','auto_commit','read_loop_limits','max_plan_items'}
 
 
+FIELDS.add('role_routes')
+
+
 class GoalSettings:
     @staticmethod
     def provisional_setting(value):
@@ -51,13 +54,30 @@ class GoalSettings:
         if 'timezone' in data:
             zone(data['timezone']);values['timezone']=data['timezone']
             values['deadline_local']=stamp(goal['deadline_epoch'],data['timezone'])['local']
+        if 'role_routes' in data:
+            values['role_routes']=self.validate_routes(data['role_routes'],self.effective_routes(goal))
+            values['budgets']=self.ledger.budgets(goal['budgets'])
         if 'builder_model' in data:
             values['builder_model']=validate_builder_model(data['builder_model'])
-        if 'reasoning' in data:values['reasoning']=self.reasoning_values(data['reasoning'])
+        if 'reasoning' in data:
+            selected=data['reasoning']
+            if goal.get('role_routes') and isinstance(selected,dict):
+                if set(selected)-{'Planner','Builder'}:raise ValueError('Unknown reasoning role.')
+                values['reasoning']=self.reasoning_values({role:value for role,value in selected.items() if value in ('minimal','low','medium','high','xhigh')})
+            else:values['reasoning']=self.reasoning_values(selected)
+            if goal.get('role_routes') or 'role_routes' in values:
+                routes=values.get('role_routes',self.effective_routes(goal))
+                for role in ('Planner','Builder'):
+                    _,model=self.model_registry.model(routes[role]['provider'],routes[role]['model'])
+                    routes[role]={**routes[role],'reasoning_effort':selected.get(role,routes[role].get('reasoning_effort')) if model['capabilities']['reasoning_efforts'] else None}
+                values['role_routes']=self.validate_routes(routes)
+        if 'role_routes' in values:
+            values['reasoning']={**goal.get('reasoning',{}),**{role:route['reasoning_effort'] for role,route in values['role_routes'].items() if role in ('Planner','Builder') and route and route.get('reasoning_effort') in ('minimal','low','medium','high','xhigh')}}
         if 'budgets' in data:
             supplied=data['budgets']
-            if not isinstance(supplied,dict) or set(supplied)-set(goal['budgets']):raise ValueError('Choose valid budget providers.')
-            merged={key:{**value,**supplied.get(key,{})} if isinstance(supplied.get(key,{}),dict) else None for key,value in goal['budgets'].items()}
+            defaults=self.ledger.budgets(goal['budgets'])
+            if not isinstance(supplied,dict) or set(supplied)-set(defaults):raise ValueError('Choose valid budget providers.')
+            merged={key:{**value,**supplied.get(key,{})} if isinstance(supplied.get(key,{}),dict) else None for key,value in defaults.items()}
             values['budgets']=self.ledger.budgets(merged)
         if 'policy' in data:
             if not isinstance(data['policy'],dict):raise ValueError('Policy must be an object.')

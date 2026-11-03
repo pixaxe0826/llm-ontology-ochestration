@@ -43,7 +43,7 @@ def defect_groups(question,item=None,korean=True):
     tests=[('citation',r'Missing parenthesized|numeric.*(?:citation|evidence)|숫자.*근거',('숫자 근거 누락','Missing numeric citations')),
         ('section',r'Missing required (?:section|key)|필수.*(?:섹션|항목)',('문서 필수 항목 누락','Missing document sections/keys')),
         ('stale',r'Stale citation|Input changed|Unknown evidence|invalid.*evidence|valid observed evidence',('유효하지 않은 근거','Invalid or outdated evidence')),
-        ('schema',r'JSON|schema|Unique plan keys|AttributeError|TypeError|Traceback|Coordinator',('플랫폼 형식·코드 오류','Platform schema/code errors')),
+        ('schema',r'JSON|schema|Unique plan keys|AttributeError|KeyError|NameError|TypeError|Traceback|Coordinator',('플랫폼 형식·코드 오류','Platform schema/code errors')),
         ('execution',r'exit|timeout|NOT RUN|not executed|GPU|command|실행',('실행·결과 확인 필요','Execution/results need checking'))]
     counts={};seen=set()
     for defect in defects:
@@ -55,7 +55,7 @@ def defect_groups(question,item=None,korean=True):
 
 def classify(question,item=None):
     text=str(question)+' '+json.dumps((item or {}).get('review_error') or {})+' '+' '.join((item or {}).get('defects',[]))
-    if re.search(r'review_error|document validation|document evidence|Missing parenthesized|Missing required section|numeric/hash mismatch|invalid.*evidence|valid observed evidence|dependency JSON|Unique plan keys|schema|AttributeError|TypeError|Coordinator|Traceback|플랫폼|검증.*(?:규칙|형식|오류)',text,re.I):return 'platform'
+    if re.search(r'review_error|document validation|document evidence|Missing parenthesized|Missing required section|numeric/hash mismatch|invalid.*evidence|valid observed evidence|dependency JSON|Unique plan keys|schema|AttributeError|KeyError|NameError|TypeError|Coordinator|Traceback|플랫폼|검증.*(?:규칙|형식|오류)',text,re.I):return 'platform'
     if re.search(r'provider|APIConnection|HTTP [45]\d\d|429|quota|budget|deadline|access denied|authentication|접근.*차단|예산|공급자',text,re.I):return 'external'
     if re.search(r'chunk|batch|rework|not finish|did not|execution failed|NOT RUN|timeout|묶음|미완료|실행.*실패',text,re.I):return 'work'
     return 'scope'
@@ -163,6 +163,16 @@ def make_brief(manager,goal,data,item_id=None,provided=None,source='server_fallb
         result['answer_helps']={'value':'yes' if pending else 'uncertain','reason':('승인 여부를 결정하면 대기 요청을 처리합니다. 기존 실행·예산 상한은 유지됩니다.' if korean and pending else '현재 활성 요청인지 확인해야 하며 답변만으로 재실행되지는 않습니다.' if korean else 'An answer resolves the waiting request; execution and budget limits remain.' if pending else 'Check whether a request is active; an answer alone does not replay execution.')}
         groups=[]
     if provided and category!='platform':result={**provided};source='model'
+    failure=data.get('failure')
+    if failure:
+        # Server-observed task ID/error is deliberately visible here; notifications stay generic.
+        from .builder_errors import safe_error
+        failure={k:(safe_error(failure[k],1800 if k=='error' else 240) if failure.get(k) else '') for k in ('task_id','stage','error','exception_type','category','diagnostic_id')}
+        category='external' if failure['category']=='provider' else 'platform'
+        result.update(failure=failure,cause=category,summary=(('Builder 실패: ' if korean else 'Builder failed: ')+failure['error'][:80]+' · '+failure['stage'][-40:]+' · Task '+failure['task_id'])[:180],
+            what_happened=[('실패 단계: ' if korean else 'Failing stage: ')+failure['stage'],('관찰된 오류: ' if korean else 'Observed error: ')+failure['error']],
+            answer_helps={'value':'uncertain','reason':reasons[category][0 if korean else 1]})
+        groups=[{'kind':'schema' if category=='platform' else 'external','label':'플랫폼 실행 오류' if korean and category=='platform' else '공급자 오류' if korean else 'Platform execution error' if category=='platform' else 'Provider error','count':1}]
     result.update(impact=impact,cost_time=cost,defect_groups=groups,source=source,version=1)
     return result
 
@@ -195,7 +205,7 @@ class HumanBriefs:
         count=0
         for decision in self.store.items('decision',None):
             if decision.get('state')!='pending' or goal_id and decision['goal_id']!=goal_id:continue
-            if decision.get('human_brief') and not language_changed:continue
+            if decision.get('human_brief') and not language_changed and not (decision.get('failure') and not decision['human_brief'].get('failure')):continue
             try:goal=self.store.get('goal',decision['goal_id'])
             except ValueError:continue
             brief=make_brief(self,goal,decision,(decision.get('affected_items') or [None])[0],source='legacy_template')

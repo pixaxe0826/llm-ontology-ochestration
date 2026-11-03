@@ -220,6 +220,8 @@ def observations(manager,goal,item,owners=None):
             stale_reason='; '.join(reasons) if reasons else 'Current: recorded inputs/file hashes unchanged.',
             supports_acceptance=ref['kind']!='git_commit' and not reasons and (outcome is None or outcome['success']))
         result[ref['id']]=ref
+    from .human_approval import observations as human_observations
+    result.update(human_observations(manager,goal,{owner['id'] for owner in (review_scope_items(manager,goal,item) if owners is None else owners)}))
     return result
 
 
@@ -231,6 +233,7 @@ def packet(observed,limit=10000,preferred=()):
     for ref in ordered:
         row={k:ref[k] for k in ('id','kind','path','file_sha256','spec_key_path','spec_value','supports_acceptance','stale','stale_reason','source_plan_item_id','producer_evidence_id','execution','gpu_job_id','gpu_artifacts','commit_hash') if k in ref}
         if ref['kind']=='copy_gpu_artifact':row['artifact_recovery']={k:ref.get(k) for k in ('operation','source_job_id','submitting_item_id','copying_item_id','source_artifact','source_sha256','destination_sha256')}
+        if ref['kind']=='human_approval':row['human_approval']={'decision_id':ref['decision_id'],'approved_files':ref['files']}
         if 'execution' in row:row['execution']={**row['execution'],'output_excerpt':row['execution'].get('output_excerpt','')[:600]}
         if ref.get('command_files'):
             row['input_tracking']={k:ref['command_files'][k] for k in ('method','unverified_inputs','note') if k in ref['command_files']}

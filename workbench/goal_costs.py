@@ -23,15 +23,28 @@ def number(value, label):
 
 
 class Ledger:
-    def __init__(self, store, prices=None):
+    def __init__(self, store, prices=None, registry=None):
         self.store = store
         self.prices = prices or json.loads(Path(__file__).with_name('goal_prices.json').read_text(encoding='utf-8'))
         self.lock = threading.RLock()
+        self.registry=registry
+
+    def provider_limits(self):
+        result={**(self.registry.budget_defaults() if self.registry else {}),**self.prices['limits']}
+        if self.registry:
+            try:saved=self.store.get('settings','provider_registry').get('providers',{})
+            except ValueError:saved={}
+            for row in saved.values():result[row.get('budget_provider',row['id'])]=row['budget']
+        return result
+
+    def limits_for(self,goal,provider):
+        defaults=self.provider_limits()[provider]
+        return goal.get('budgets',{}).get(provider,defaults)
 
     def budgets(self, supplied=None):
         supplied = supplied or {}
         result = {}
-        for provider, defaults in self.prices['limits'].items():
+        for provider, defaults in self.provider_limits().items():
             value = supplied.get(provider, {})
             if not isinstance(value, dict):
                 raise ValueError('제공자별 예산을 확인하세요.')
@@ -46,6 +59,12 @@ class Ledger:
         return result
 
     def rate(self, provider, model):
+        if self.registry:
+            # Registered model prices override provider fallbacks; existing custom test price tables remain authoritative for built-ins.
+            try:saved=self.store.get('settings','provider_registry').get('providers',{})
+            except ValueError:saved={}
+            if provider not in self.prices['tokens_per_million'] and provider!='modal' or ('modal_llm' if provider=='modal' else provider) in saved:
+                if (registered:=self.registry.rate(provider,model)) is not None:return registered
         if provider == 'modal': provider = 'modal_llm'
         name = 'meta_contributor' if provider == 'meta' and 'contributor' in model else provider
         if name not in self.prices['tokens_per_million']:
@@ -88,7 +107,7 @@ class Ledger:
         with self.lock:
             rows = [r for r in self.rows() if r['provider'] == provider and r['state'] != 'released']
             warnings = []
-            for scope, limits in [('platform', self.prices['limits'][provider]), ('goal', goal['budgets'][provider])]:
+            for scope, limits in [('platform', self.provider_limits()[provider]), ('goal', self.limits_for(goal,provider))]:
                 scoped = rows if scope == 'platform' else [r for r in rows if r['goal_id'] == goal['id']]
                 total = sum(self.amount(r) for r in scoped)
                 caps = [('전체', total, limits['total'])]
@@ -118,6 +137,7 @@ class Ledger:
         amount=number(amount,'추정 비용')
         with self.lock:
             warnings=self.check_reservation(goal,provider,purpose,amount,**metadata)
+            if metadata.get('price_estimated'):warnings.append(provider+' price not registered; conservative estimated pricing is used.')
             return self.store.save('ledger', {'goal_id':goal['id'], 'provider':provider, 'purpose':purpose, 'role':role,
                 'route':metadata.pop('route',provider), 'workload':metadata.pop('workload','gpu' if provider=='modal' else 'llm'),
                 'model':model, 'created':time.time(), 'state':'reserved', 'reserved_usd':amount, 'estimated_usd':0,

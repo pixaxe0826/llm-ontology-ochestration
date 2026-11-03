@@ -11,7 +11,7 @@ from .plan_capacity import PlanCapacityError,plan_limit,DEFAULT as DEFAULT_PLAN_
 from .item_states import terminal
 from .goal_costs import GoalLimit
 
-READ_TOOLS={'read_file','read_structured','search_files','list_files','code_map'}
+READ_TOOLS={'read_file','read_structured','search_files','list_files','code_map','file_hash'}
 ACTION_TOOLS={'write_file','edit_file','run_command','start_long_command','submit_gpu_job','copy_gpu_artifact'}
 NOTICE='Your next action must write a file (prefer edit_file for existing files) or execute a permitted local command. Implement from what you have already read; do not repeat reading to postpone the deliverable. Safety, approvals and budget limits still apply. If an action is unsafe or genuinely blocked, report the concrete blocker instead of making a dummy change.'
 

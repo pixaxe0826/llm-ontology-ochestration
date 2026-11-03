@@ -202,7 +202,7 @@ class Notifications:
         except ValueError:pass
         brief=(decision or {}).get('human_brief')
         if brief and brief.get('language')==('Korean' if korean else 'English'):
-            summary=brief['summary']+' '+brief['answer_helps']['reason']
+            summary=('Builder 실행이 실패했습니다. 앱에서 실패 단계와 오류를 확인해 주세요.' if korean else 'Builder execution failed. Inspect the stage and error in the app.') if brief.get('failure') else brief['summary']+' '+brief['answer_helps']['reason']
         return {'event_label':safe_text(label),'summary':safe_text(summary,160),'title':safe_text(goal.get('title') or 'Goal'),
                 'human_display_language':'Korean' if korean else 'English'}
 

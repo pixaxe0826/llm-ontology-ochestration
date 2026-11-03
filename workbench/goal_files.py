@@ -19,10 +19,16 @@ def file_tools(tools):
         {'path':S,'old_str':S,'new_str':S},['path','old_str','new_str']))
     result.append(tool('code_map','Locate Python modules/classes/functions (signatures, first docstring lines, line numbers) using AST without execution; YAML/JSON top-level structure. Hash-cached, bounded 20000-character JSON. Optional paths are workspace-relative files/folders.',
         {'paths':{'type':'array','items':S,'maxItems':20}},[]))
+    result.append(tool('file_hash','Read-only SHA-256 and size for 1–20 workspace files (text or binary). No shell/script needed. Protected paths/credentials are refused. Limits: 32 MiB per file, 64 MiB total. Use the destination hash as copy_gpu_artifact.expected_sha256.',
+        {'paths':{'type':'array','items':S,'minItems':1,'maxItems':20}},['paths']))
     return result
 
 
 class GoalFiles:
+    def file_hash_tool(self,task,args):
+        from .file_hashes import file_hashes
+        return file_hashes(Workspace(task['workspace'],self.store.root),args.get('paths'))
+
     def read_tool(self,task,name,args,chunk_id):
         ws=Workspace(task['workspace'],self.store.root)
         if name=='read_file':raw=ws.read(args['path'],args.get('start_line'),args.get('end_line'),include_lines=True)

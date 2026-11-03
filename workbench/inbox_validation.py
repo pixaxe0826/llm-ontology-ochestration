@@ -22,6 +22,7 @@ def prepare_action(manager,goal,row,action,prohibited):
     if row['kind']=='note' and (items or directions or actions):raise ValueError('note_is_reference_only')
     if action['status']=='rejected' and (items or directions or actions):raise ValueError('rejected_action_has_changes')
     fields={'key','id','operation','title','acceptance','acceptance_rules','role','parent','depends_on','blocked_by_decision','priority','provisional_scope','files_to_read','files_to_write','commands_to_run','status','superseded_reason','superseded_by'}
+    fields.add('builder_route')
     if not isinstance(items,list) or any(not isinstance(i,dict) or set(i)-fields for i in items):raise ValueError('plan_update_fields_forbidden')
     if any('status' in i and i['status']!='superseded' for i in items):raise ValueError('plan_update_fields_forbidden')
     patch=prepare_plan(manager.items(goal['id']),items,max_plan_items=goal.get('max_plan_items',40),allow_unreplaced_supersession=supersede_requested(row['text']));manager.validate_decision_refs(goal,patch)
@@ -30,25 +31,38 @@ def prepare_action(manager,goal,row,action,prohibited):
     def target(spec):
         if not isinstance(spec,dict) or not isinstance(spec.get('item_id'),str) or spec['item_id'] not in lookup:raise ValueError('invalid_item_action_target')
         return lookup[spec['item_id']]
-    parsed_actions=[];seen=set()
+    parsed_actions=[];seen=set();active_directions=[]
     for spec in actions:
         item=target(spec);text=attach_original(spec.get('instruction',row['text']),row['text'])
         if item['id'] in seen or prohibited(text):raise ValueError('invalid_item_action_target')
         reason=spec.get('reason',spec.get('superseded_reason'));replacement=spec.get('superseded_by')
         if spec.get('resolution')=='superseded' and not supersede_requested(row['text']):raise ValueError('Human closure request required for superseded.')
-        manager.validate_item_action(goal,item,spec.get('resolution'),text,reason,replacement);seen.add(item['id']);parsed_actions.append((item['id'],spec['resolution'],text,reason,replacement))
+        seen.add(item['id'])
+        if item['id'] in active and item['status']!='superseded' and spec.get('resolution')=='rework':
+            # Adding requirements to a running item is not a new execution cycle.
+            active_directions.append((item['id'],text));continue
+        manager.validate_item_action(goal,item,spec.get('resolution'),text,reason,replacement);parsed_actions.append((item['id'],spec['resolution'],text,reason,replacement))
     parsed=[]
     for direction in directions:
         item=target(direction);text=attach_original(direction.get('text'),row['text'])
         if prohibited(text):raise ValueError('invalid_item_direction')
         parsed.append((item['id'],text))
+    parsed.extend(active_directions)
+    grouped={}
+    for identifier,text in parsed:
+        if text not in grouped.setdefault(identifier,[]):grouped[identifier].append(text)
+    parsed=[(identifier,attach_original('\n'.join(texts),row['text'])) for identifier,texts in grouped.items()]
+    if len(parsed)>40:raise ValueError('invalid_instructions')
     touched={r['id'] for r in patch['updates']}|{r[0] for r in parsed}|seen
-    if touched & active:raise ValueError('active_item_update_deferred')
+    touched.update(r['parent_id'] for r in patch['creates'] if r.get('parent_id'))
     if any(r.get('status')=='superseded' for r in patch['updates']) and not supersede_requested(row['text']):raise ValueError('Human closure request required for superseded.')
     if row['kind']!='note' and action['status']=='applied' and supersede_requested(row['text']) and not any(a[1]=='superseded' for a in parsed_actions) and not any(r.get('status')=='superseded' for r in patch['updates']):
         raise ValueError('closure_not_applied: return a superseded item action, or mark partial/rejected and explain why closure was not applied.')
     if action['status']=='partial' and not unmet:raise ValueError('partial_ack_requires_reason')
-    return {'patch':patch,'actions':parsed_actions,'directions':parsed,'unmet':unmet,'state':'partial' if unmet and action['status']=='applied' else action['status']}
+    normalized={**action,'instructions':[{'item_id':identifier,'text':text} for identifier,text in parsed],
+        'item_actions':[{'item_id':identifier,'resolution':resolution,'instruction':text,'reason':reason,'superseded_by':replacement} for identifier,resolution,text,reason,replacement in parsed_actions]}
+    return {'patch':patch,'actions':parsed_actions,'directions':parsed,'unmet':unmet,'state':'partial' if unmet and action['status']=='applied' else action['status'],
+        'defer_active':sorted(touched & active),'deferred_targets':sorted(touched),'normalized_action':normalized}
 
 
 def readable_error(message,korean=True):

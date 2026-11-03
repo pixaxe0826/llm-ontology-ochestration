@@ -29,7 +29,7 @@ powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\scripts\set_base
 - Baseten 모델은 `meta-models/muse-spark-open-1026`으로 고정됩니다.
 - 완료·superseded 항목은 계획 슬롯을 쓰지 않으며, superseded는 수용 완료와 구분됩니다.
 - GPU 결과 회수 근거는 제출한 입력 파일의 현재 해시도 검사합니다.
-- 오프라인 회귀 검사: Python 710개와 JavaScript 5개 묶음 PASS. 공급자·GPU 실호출 테스트는 별도입니다.
+- 2026-11-03 오프라인 회귀 검사: Python 테스트 실행 788회와 JavaScript 6개 스위트 PASS. 외부 모델/GPU 요청을 차단한 검사입니다.
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
@@ -38,7 +38,24 @@ node tests/test_goal_decision_view.cjs
 node tests/test_chat_attachments.cjs
 node tests/test_goal_executions.cjs
 node tests/test_ui_performance.cjs
+node tests/test_model_routing_ui.cjs
 ```
+
+## Goal 역할별 공급자와 사람 승인
+
+Goal 생성·설정에서 Planner/Reviewer, Builder, 이미지 분석, 참고 검색의 공급자·모델을 각각 선택합니다. 개별 계획 항목의 **Builder 경로**에서 그 항목만 별도로 지정할 수도 있습니다. 실행 중 변경은 다음 묶음 경계부터 적용됩니다. 기존 Goal의 경로·기록과 제품 프록시의 독립 설정은 유지합니다.
+
+연결 설정에서 OpenAI 호환 공급자의 주소·모델·기능·가격을 등록합니다. 키는 WebUI에 입력하지 않고 다음 보안 입력 스크립트를 사용합니다. OpenAI 템플릿의 공급자 ID는 `openai`입니다.
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\scripts\set_provider_key.ps1 -Provider openai
+```
+
+시각 승인 기준에는 `human_approval`과 `approval_paths`를 사용합니다. 해당 파일 해시에 대한 명시적인 사람 승인이 있어야 하며, 파일이 바뀌면 다시 승인받아야 합니다. 이 기준은 새로운 명령이나 GPU 실행을 요구하지 않습니다. 실행 기준과 문서 기준의 근거 규칙은 그대로 유지됩니다.
+
+실제 소액 점검: Meta Planner + Baseten Builder, Baseten Planner + Baseten Builder 두 임시 Goal 및 OpenAI 연결 PASS. 초기 검토 실패와 수정 후 기존 근거 재검토까지 포함한 추정 비용은 $0.1494입니다. Modal LLM 실제 역할 호출은 NOT RUN이며 등록 모델과 기능을 먼저 확인해야 합니다. [설정·보안·API 상세](GOAL_MODE.md)를 참고하세요.
+
+이 커밋은 개발 소스 공개입니다. 기존 운영 PC의 서버나 Goal을 자동으로 배포·재시작하지 않습니다.
 
 ## 상세 사용법
 

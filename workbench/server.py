@@ -63,7 +63,8 @@ class Application:
         for kind in ("task", "gpu"):
             for row in self.store.items(kind):
                 if row["status"] in ("running", "waiting_approval", "queued"):
-                    self.store.update(kind, row["id"], status="interrupted", approval=None, error="서버가 재시작됐습니다. 실행 상태를 확인한 뒤 계속하거나 중지하세요.")
+                    marker={'restart_interruption':{'kind':'server_restart','created':time.time(),'generation':row.get('generation')}} if kind=='task' and row.get('goal_id') else {}
+                    self.store.update(kind, row["id"], status="interrupted", approval=None, error="서버가 재시작됐습니다. 실행 상태를 확인한 뒤 계속하거나 중지하세요.",**marker)
                 elif row["status"] in ("succeeded","failed","paused","cancelled","interrupted"):
                     self.memory.enqueue(kind,row)
         self.goals = GoalManager(self.store,self.providers,self.gpu,self.memory)
@@ -146,6 +147,18 @@ class Application:
         with scope:return self._handle(method,path,data,query)
 
     def _handle(self, method, path, data, query):
+        if path=='/api/provider-registry' and method=='GET':
+            from .provider_checks import ProviderChecks
+            return ProviderChecks(self.goals).status()
+        if path=='/api/provider-registry' and method=='POST':return self.goals.model_registry.save(data)
+        if path=='/api/provider-registry/test' and method=='POST':
+            from .provider_checks import ProviderChecks
+            return ProviderChecks(self.goals).test(data)
+        if path=='/api/provider-registry/models' and method=='POST':
+            from .security import contains_key
+            with self.providers.goal_client(data['provider']) as client:
+                return {'models':sorted({r.id for r in client.models.list().data if isinstance(r.id,str) and len(r.id)<=200 and not contains_key(r.id)})}
+        if path=='/api/goals/item-route' and method=='POST':return self.goals.update_item_route(data['goal_id'],data)
         if method=='GET' and path=='/api/ui/history':
             return {'tasks':self.public_tasks(compact=self.ui_metrics.config.get('compact_lists',True)),
                     'jobs':self.public_jobs(),'goals':self.store.items('goal',None)}
@@ -173,7 +186,7 @@ class Application:
             return self.store.items('goal',None)
         if method == 'GET' and path == '/api/goals/config':
             from .generation import settings
-            return {'prices':self.goals.ledger.prices,'limits':settings(),'defaults':self.goals.defaults(),'muse_open':self.goals.muse_routes.status(),
+            return {'prices':self.goals.ledger.prices,'registry':self.goals.model_registry.public(),'limits':settings(),'defaults':self.goals.defaults(),'muse_open':self.goals.muse_routes.status(),
                     'builder_models':list(BUILDER_MODELS),'builder_default':DEFAULT_BUILDER_MODEL}
         if method=='POST' and path=='/api/goals/models':
             return builder_catalog(self.providers.models('meta'))

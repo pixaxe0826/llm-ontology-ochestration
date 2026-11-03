@@ -34,7 +34,7 @@ class GoalOperations:
                 self.store.update('goal_model_attempt',row['id'],state='succeeded',finished=time.time())
                 return result
             except Exception as error:
-                label=failure_label(error);again=provider in ('meta','baseten') and retryable(error) and index<len(DELAYS)
+                label=failure_label(error);again=retryable(error) and index<len(DELAYS)
                 self.store.update('goal_model_attempt',row['id'],state='failed',finished=time.time(),error=label,retry_scheduled=again)
                 if not again:raise
                 delay=DELAYS[index]

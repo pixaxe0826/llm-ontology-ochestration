@@ -62,3 +62,20 @@ class GPUInputFreshnessTests(unittest.TestCase):
         verdict={'decision':'accept','criteria':[{'criterion':item['acceptance'][0],'evidence_ids':[r['id'] for r in item['evidence']]}],'defects':[],'summary':'Claimed all outputs','next_items':[],'goal_complete':False}
         with patch.object(self.manager,'inbox_phase',return_value=(json.dumps(verdict),[])):self.assertTrue(self.manager.review(goal,item))
         current=self.store.get('plan_item',item['id']);self.assertEqual(current['status'],'rework');self.assertEqual(current.get('review_error_count'),0);self.assertIn('recovery proofs',current['defects'][0])
+
+    def test_human_requested_new_render_cannot_accept_old_copy_or_another_submitting_item(self):
+        goal,item,task,job,args,proof=self.recover();valid=self.manager.valid_evidence(goal,item);criteria=[{'evidence_ids':list(valid)}]
+        requirement={'paths':{'frame.png':'review/copy.png'},'excluded_job_ids':[job['id']]}
+        with self.assertRaises(GPUArtifactEvidenceError):require_recovery(self.manager,goal,{**item,'gpu_artifact_requirement':requirement},valid,criteria)
+        requirement['excluded_job_ids']=[];requirement['submitting_item_id']='another-item'
+        with self.assertRaises(GPUArtifactEvidenceError):require_recovery(self.manager,goal,{**item,'gpu_artifact_requirement':requirement},valid,criteria)
+        requirement['submitting_item_id']=item['id'];require_recovery(self.manager,goal,{**item,'gpu_artifact_requirement':requirement},valid,criteria)
+
+    def test_new_visual_chain_requires_current_image_analysis_and_recorded_human_request(self):
+        goal,item,task,job,args,proof=self.recover();valid=self.manager.valid_evidence(goal,item);req={'paths':{'frame.png':'review/copy.png'},'analysis_paths':['review/copy.png']};item={**item,'gpu_artifact_requirement':req}
+        with self.assertRaises(GPUArtifactEvidenceError):require_recovery(self.manager,goal,item,valid,[{'evidence_ids':list(valid)}])
+        valid['observation:analysis']={'kind':'analyze_images','files':{'review/copy.png':'current-hash'}}
+        require_recovery(self.manager,goal,item,valid,[{'evidence_ids':list(valid)}]);req['visual_request_after']=0
+        with self.assertRaises(GPUArtifactEvidenceError):require_recovery(self.manager,goal,item,valid,[{'evidence_ids':list(valid)}])
+        self.manager.create_decision(goal,{'question':'Approve the new visual result at review/copy.png?','options':['Approve','Revise'],'recommendation':'Approve','affected_items':[item['id']]})
+        require_recovery(self.manager,goal,item,valid,[{'evidence_ids':list(valid)}])

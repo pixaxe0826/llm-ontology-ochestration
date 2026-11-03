@@ -64,6 +64,11 @@ def prepare_plan(existing,rows,require_nonempty=False,max_plan_items=DEFAULT,all
         criteria,rules=normalize_criteria(criteria,raw.get('acceptance_rules'),target.get('acceptance_rules') if target else None)
         row={'key':plan_key(target) if target else key,'title':title,'acceptance':criteria,'role':'Builder'}
         row.update(implementation_hints(raw,target))
+        if 'builder_route' in raw:
+            route=raw['builder_route']
+            if route is not None and (not isinstance(route,dict) or set(route)-{'provider','model','reasoning_effort'} or not all(isinstance(route.get(k),str) and route[k] for k in ('provider','model'))):raise ValueError('builder_route requires registered provider/model.')
+            row['builder_route']=route
+        elif target and 'builder_route' in target:row['builder_route']=target['builder_route']
         if raw.get('status')=='superseded':
             if target is None:raise ValueError('Superseded must update an existing item.')
             reason=raw.get('superseded_reason',raw.get('reason'))
@@ -154,7 +159,8 @@ def prepare_plan(existing,rows,require_nonempty=False,max_plan_items=DEFAULT,all
                 choices=aliases.get(ref,{ref})
                 if len(choices)!=1:raise ValueError(f'Ambiguous dependency {ref}.')
                 identifier=id_for.get(next(iter(choices)))
-            if identifier is None or identifier==row['id']:raise ValueError('Unknown or self dependency.')
+            if identifier is None:raise ValueError(f"Unknown dependency {ref!r} for item {row['key']!r}; use an exact existing item ID or key.")
+            if identifier==row['id']:raise ValueError(f"Self dependency {ref!r} for item {row['key']!r} is forbidden.")
             refs.append(identifier)
         row['depends_on']=list(dict.fromkeys(refs));dependency_ids[row['id']]=refs
     def visit(identifier,trail):
@@ -172,5 +178,5 @@ def prepare_plan(existing,rows,require_nonempty=False,max_plan_items=DEFAULT,all
 
 def initial_items(rows,max_plan_items=DEFAULT):
     patch=prepare_plan([],rows,True,max_plan_items);keys={r['id']:r['key'] for r in patch['creates']}
-    return [{k:r[k] for k in ('key','title','acceptance','role','blocked_by_decision','priority','provisional_scope','acceptance_rules',*HINT_FIELDS) if k in r}|
+    return [{k:r[k] for k in ('key','title','acceptance','role','blocked_by_decision','priority','provisional_scope','acceptance_rules','builder_route',*HINT_FIELDS) if k in r}|
             {'parent':keys.get(r['parent_id']),'depends_on':[keys[v] for v in r['depends_on']]} for r in patch['creates']]

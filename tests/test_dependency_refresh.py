@@ -53,7 +53,7 @@ class DependencyRefreshTests(unittest.TestCase):
         self.assertEqual(result['blocked_by_decision'],original['blocked_by_decision']);self.assertEqual(result['attempts'],original['attempts'])
         self.assertEqual(self.manager.pending_decisions(self.goal['id']),[])
         attempts=self.store.items('goal_dependency_attempt',None)
-        self.assertEqual(len(attempts),2);self.assertTrue(all('Unknown or self dependency' in a['error'] for a in attempts))
+        self.assertEqual(len(attempts),2);self.assertTrue(all("Unknown dependency 'does-not-exist'" in a['error'] for a in attempts))
         self.assertIn('Specific validation error:',calls.call_args_list[1].args[2])
 
     def test_resolution_with_empty_graph_update_passes(self):
@@ -74,6 +74,19 @@ class DependencyRefreshTests(unittest.TestCase):
         secret='synthetic-dependency-credential-111987';register_secret(secret)
         self.items('P3');self.refresh({'items':[{'key':'P3','priority':secret}]})
         self.assertNotIn(secret,json.dumps(self.store.items('goal_dependency_attempt',None)))
+
+
+    def test_warning_includes_exact_validator_error_stage_and_prior_graph(self):
+        item=self.items('known')[0];before=self.store.get('plan_item',item['id'])
+        self.refresh({'items':[{'key':'known','depends_on':['short-invalid-id']}]})
+        rows=self.store.items('goal_dependency_attempt',None);self.assertEqual(len(rows),2)
+        self.assertEqual(rows[0]['error_details']['stage'],'dependency/plan schema');self.assertIn('short-invalid-id',rows[0]['error'])
+        self.assertEqual(self.store.get('plan_item',item['id']),before)
+        note=self.manager.messages(self.goal['id'])[-1];self.assertIn('short-invalid-id',note['body']);self.assertIn('short-invalid-id',note['human_summary'])
+    def test_context_failure_is_logged_as_context_not_invalid_planner_json(self):
+        self.items('known');goal=self.store.update('goal',self.goal['id'],decision_replan_pending=True)
+        with patch.object(self.manager,'inbox_phase',side_effect=KeyError('evidence_refs')):self.manager.refresh_dependencies(goal)
+        rows=self.store.items('goal_dependency_attempt',None);self.assertTrue(all(r['error_details']['stage']=='context/provider' for r in rows));self.assertIn('evidence_refs',self.manager.messages(self.goal['id'])[-1]['human_summary'])
 
 
 if __name__=='__main__':unittest.main()

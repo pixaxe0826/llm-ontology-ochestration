@@ -37,7 +37,7 @@ class DocumentCycles:
             if not isinstance(row,dict):continue
             name=row.get('criterion');ids=row.get('evidence_ids',[])
             if name in item['acceptance'] and rule_for(item,name)['kind']!='document' and isinstance(ids,list) and ids and all(isinstance(i,str) and i in valid for i in ids) and any(valid[i]['kind'] in EXECUTION_KINDS for i in ids):proof[name]=ids
-        required={c for c in item['acceptance'] if rule_for(item,c)['kind']!='document'}
+        required={c for c in item['acceptance'] if rule_for(item,c)['kind']=='execution'}
         return proof if required<=proof.keys() and self.fresh_rerun_observed(goal,item,valid) else None
 
     def document_cycle_assessment(self,goal,item,value):
@@ -79,7 +79,7 @@ class DocumentCycles:
     def document_cycle_guard(self,task,name,args):
         item=self.store.get('plan_item',task['plan_item_id'])
         if not item.get('document_cycle_active'):return
-        reads={'read_file','read_structured','search_files','list_files','code_map','memory_search','memory_read','report_item','ask_planner','request_decision','get_gpu_job','read_gpu_artifact','check_long_command'}
+        reads={'read_file','read_structured','search_files','list_files','code_map','file_hash','memory_search','memory_read','report_item','ask_planner','request_decision','get_gpu_job','read_gpu_artifact','check_long_command'}
         if name in reads:return
         if name in ('write_file','edit_file'):
             # Workspace.path still applies the existing traversal/absolute/secret checks.

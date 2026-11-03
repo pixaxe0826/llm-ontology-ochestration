@@ -21,6 +21,7 @@ DECISION_PARAMETERS={
     'question':{'type':'string'},'options':{'type':'array','items':{'type':'string'}},
     'recommendation':{'type':'string'},'reason':{'type':'string'},
     'affected_items':{'type':'array','items':{'type':'string'}},'reversible':{'type':'boolean'},'human_brief':HUMAN_BRIEF_SCHEMA}
+DECISION_PARAMETERS.update(approval_paths={'type':'array','items':{'type':'string'},'minItems':1,'maxItems':20},approval_option={'type':'string'})
 
 def dependencies_known(item):
     return all(isinstance(item.get(k),list) for k in ('depends_on','blocked_by_decision'))
@@ -50,25 +51,30 @@ class GoalDecisions(ItemSupersession):
         if type(reversible) is not bool:raise ValueError('Reversible must be a boolean.')
         if options and recommendation and recommendation not in options:raise ValueError('The recommendation must match an option.')
         affected=self.resolve_items(goal['id'],data.get('affected_items',[item_id] if item_id else []))
+        from .human_approval import capture
+        binding=capture(self,goal,data)
         provided=None
         if data.get('human_brief'):
             try:provided=validate_brief(data['human_brief'],goal,data)
             except (ValueError,TypeError,KeyError):pass # Deterministic fallback for automatic/server callers.
         human_brief=make_brief(self,goal,{**data,'affected_items':affected,'approval_id':approval_id,'source':source},item_id,provided)
         fingerprint=source or ('question:'+str(item_id)+':'+hashlib.sha256(question.encode()).hexdigest())
+        if binding:fingerprint+=':files:'+hashlib.sha256(json.dumps(binding['approval_files'],sort_keys=True).encode()).hexdigest()
         with self.lock:
             old=next((d for d in self.decisions(goal['id']) if d.get('source')==fingerprint),None)
             if old:return old
             decision=self.store.save('decision',{'goal_id':goal['id'],'question':question.strip(),'options':options,
                 'recommendation':recommendation,'reason':reason,'affected_items':affected,'reversible':reversible,
                 'state':'pending','created':time.time(),'answered_at':None,'answer':None,'role':role,
-                'source':fingerprint,'approval_id':approval_id,'human_brief':human_brief,**self.times(goal)})
+                'source':fingerprint,'approval_id':approval_id,'human_brief':human_brief,**binding,**({'failure':data['failure']} if data.get('failure') else {}),**self.times(goal)})
             for identifier in affected:
                 item=self.store.get('plan_item',identifier)
                 self.store.update('plan_item',identifier,blocked_by_decision=list(dict.fromkeys([*item.get('blocked_by_decision',[]),decision['id']])))
             return decision
 
     def request_decision(self,goal,item,args,role):
+        # Failure details are server observations, never model-authored claims.
+        args={k:v for k,v in args.items() if k!='failure'}
         if role=='Planner' and getattr(self.review_scope,'validate_human_brief',False):
             key=hashlib.sha256(str(args.get('question','')).encode()).hexdigest()
             try:validate_brief(args.get('human_brief'),goal,args)
@@ -131,7 +137,7 @@ class GoalDecisions(ItemSupersession):
         goal,item=self.builder_item_guard(task)
         ids=item.get('provisional_decisions',[])
         if not ids:return
-        if name in ('read_file','read_structured','list_files','search_files','code_map','memory_search','memory_read','request_decision','ask_planner','report_item','check_long_command','cancel_long_command'):return
+        if name in ('read_file','read_structured','list_files','search_files','code_map','file_hash','memory_search','memory_read','request_decision','ask_planner','report_item','check_long_command','cancel_long_command'):return
         if name in ('write_file','edit_file'):
             if self.core_spec_path(args.get('path','')):raise PermissionError('PROVISIONAL work cannot change specification/core structured files.')
             return
@@ -182,8 +188,10 @@ class GoalDecisions(ItemSupersession):
             if type(withdraw) is not bool:raise ValueError('Withdraw must be a boolean.')
             if not isinstance(answer,str) or not withdraw and not answer.strip() or len(answer)>8000 or contains_key(answer):raise ValueError('Provide a listed choice and/or a non-secret direct answer (at most 4000 direct-answer characters).')
             answer=answer.strip();same=not withdraw and answer==decision['recommendation']
+            from .human_approval import validate_answer
+            approved_files=validate_answer(self,goal,decision,option,free,withdraw)
             self.store.update('decision',decision['id'],state='withdrawn' if withdraw else 'answered',answer=answer,
-                selected_option=option,answer_text=free,answered_at=time.time(),matches_recommendation=same,answered_utc=self.times(goal)['time_utc'],answered_local=self.times(goal)['time_local'])
+                selected_option=option,answer_text=free,answered_at=time.time(),matches_recommendation=same,answered_utc=self.times(goal)['time_utc'],answered_local=self.times(goal)['time_local'],**approved_files)
             changed=[];direct=[]
             for item in self.items(goal_id):
                 if item['status']=='superseded':continue
@@ -257,6 +265,7 @@ class GoalDecisions(ItemSupersession):
         ids={d['id'] for d in self.decisions(goal['id'])}
         for row in [*patch['updates'],*patch['creates']]:
             if any(ref not in ids for ref in row.get('blocked_by_decision',[])):raise ValueError('Unknown decision reference in this Goal.')
+            if row.get('builder_route') is not None:row['builder_route']=self.model_registry.validate_route(row['builder_route'],'Builder')
 
     def validate_item_action(self,goal,item,action,instruction,superseded_reason=None,superseded_by=None):
         if action not in ('rework','review','blocked','superseded'):raise ValueError('Resolution must be rework, review, blocked, or superseded.')
@@ -269,7 +278,7 @@ class GoalDecisions(ItemSupersession):
     def apply_decision_action(self,goal,item,action,instruction,decision_id,source_kind='decision',superseded_reason=None,superseded_by=None):
         if source_kind=='directive':
             source=self.store.get('goal_directive',decision_id)
-            if source['goal_id']!=goal['id'] or source['state'] not in ('pending','processing') or source['kind']=='note':raise ValueError('An active human instruction is required for item actions.')
+            if source['goal_id']!=goal['id'] or source['state'] not in ('pending','processing','queued') or source['kind']=='note':raise ValueError('An active human instruction is required for item actions.')
         else:
             source=self.store.get('decision',decision_id)
             if source['goal_id']!=goal['id'] or source['state']!='answered':raise ValueError('An answered human decision is required for item actions.')
@@ -287,7 +296,7 @@ class GoalDecisions(ItemSupersession):
         values['inbox_action_source' if source_kind=='directive' else 'decision_action_source']=decision_id
         values['applied_decision_actions']={**item.get('applied_decision_actions',{}),token:audit['id']}
         if action=='rework':
-            values.update(accepted_criteria={},bundles=0,bundle_reported=0,review_trigger=None,document_cycle_active=False,
+            values.update(accepted_criteria={},bundles=0,bundle_reported=0,review_trigger=None,document_cycle_active=False,review_only_next=False,
                           execution_cycle=(item.get('execution_cycle') or 0)+1,
                           cycle_started_at=time.time(),
                           historical_bundles=item.get('historical_bundles',0)+item['bundles'])
@@ -308,7 +317,7 @@ class GoalDecisions(ItemSupersession):
             source=item.get('decision_action_source')
             if not source:
                 source=next((d['id'] for d in reversed(self.decisions(goal['id'])) if d['state']=='answered' and item['id'] in d['affected_items']),None)
-            if not source:raise ValueError('Action needs an answered human decision affecting this item.')
+            if not source:raise ValueError('Action needs an answered human decision affecting item '+plan_key(item)+' ('+item['id']+'). Human instructions/interrupts must use human_actions, not dependency actions.')
             action=row.get('resolution');instruction=row.get('instruction') or item.get('human_instruction') or self.store.get('decision',source).get('answer','')
             if action not in ('rework','review','blocked','superseded'):raise ValueError('Resolution must be rework, review, blocked, or superseded.')
             if not isinstance(instruction,str) or len(instruction)>8000 or contains_key(instruction):raise ValueError('Invalid action instruction.')
@@ -325,17 +334,17 @@ class GoalDecisions(ItemSupersession):
         items=self.items(goal['id']);unknown=[i for i in items if i['status']!='superseded' and not dependencies_known(i)]
         if not unknown and not goal.get('decision_replan_pending'):return
         if goal.get('dependency_refresh_error') and not goal.get('decision_replan_pending'):return
-        instruction=dependency_instruction(items,self.decisions(goal['id']));safe_actions=[];attempts=[]
+        instruction=dependency_instruction(items,self.decisions(goal['id']));safe_actions=[];attempts=[];errors=[]
         for retry in range(2):
-            raw='';attempt=None
+            raw='';attempt=None;stage='context/provider'
             try:
-                raw,human_queue=self.inbox_phase(goal,None,instruction);value=self.parse(raw)
+                raw,human_queue=self.inbox_phase(goal,None,instruction);stage='JSON parsing';value=self.parse(raw)
                 attempt=self.store.save('goal_dependency_attempt',{'goal_id':goal['id'],'retry':retry,'response':redact(raw),
                     'instruction':redact(instruction),'created':time.time(),**self.times(goal)})
                 attempts.append(attempt['id'])
                 if value.get('items') is None:value['items']=[]
-                safe_actions=self.dependency_actions(goal,items,value)
-                patch=prepare_plan(items,value['items'],max_plan_items=goal.get('max_plan_items',DEFAULT_PLAN_LIMIT));self.validate_decision_refs(goal,patch)
+                stage='human decision actions';safe_actions=self.dependency_actions(goal,items,value)
+                stage='dependency/plan schema';patch=prepare_plan(items,value['items'],max_plan_items=goal.get('max_plan_items',DEFAULT_PLAN_LIMIT));self.validate_decision_refs(goal,patch)
                 for item in items:
                     if not item.get('acceptance_replan_pending'):continue
                     raw=next((r for r in value['items'] if r.get('key') in (item['id'],plan_key(item)) or r.get('id')==item['id']),None)
@@ -356,19 +365,23 @@ class GoalDecisions(ItemSupersession):
                 return
             except GoalLimit:raise
             except (ValueError,TypeError,KeyError) as error:
+                detail={'stage':stage,'exception_type':type(error).__name__,'message':redact(str(error))[:1600]};errors.append(detail)
                 if attempt is None:
                     attempt=self.store.save('goal_dependency_attempt',{'goal_id':goal['id'],'retry':retry,'response':redact(raw),
                         'instruction':redact(instruction),'created':time.time(),**self.times(goal)})
                     attempts.append(attempt['id'])
-                self.store.update('goal_dependency_attempt',attempt['id'],validation='rejected',error=redact(str(error)))
-                instruction+='\nSpecific validation error: '+redact(str(error))+'. Return corrected JSON once; use items:[] for no dependency changes.'
+                self.store.update('goal_dependency_attempt',attempt['id'],validation='rejected',error=detail['message'],error_details=detail)
+                instruction+='\nSpecific validation error: ['+stage+'] '+detail['message']+'. Return corrected JSON once; use items:[] for no dependency changes.'
         # A malformed graph is a platform warning, never a new human question.
         for item,action,text,source,reason,replacement in safe_actions:self.apply_decision_action(goal,self.store.get('plan_item',item['id']),action,text,source,superseded_reason=reason,superseded_by=replacement)
         for item in self.items(goal['id']):
             if item.get('needs_decision_replan') and dependencies_known(item):
                 self.store.update('plan_item',item['id'],needs_decision_replan=False,instruction=item.get('human_instruction') or item.get('instruction',''))
-        self.save(goal,decision_replan_pending=False,dependency_refresh_error='Planner dependency validation failed; previous dependencies retained.',dependency_warning_attempts=attempts)
-        self.message(goal,'System','Builder','NOTE','Platform warning: dependency validation failed twice. Previous dependencies retained; validated human item actions applied. Unknown dependencies remain blocked.',evidence=attempts)
+        details='; '.join(e['stage']+' / '+e['exception_type']+': '+e['message'] for e in errors)
+        self.save(goal,decision_replan_pending=False,dependency_refresh_error='Planner dependency validation failed; previous dependencies retained. '+details,dependency_warning_attempts=attempts,dependency_warning_errors=errors)
+        note=self.message(goal,'System','Human','NOTE','Platform warning: dependency validation failed twice. Previous dependencies retained; validated human item actions applied. Unknown dependencies remain blocked. Errors: '+details,evidence=attempts)
+        from .human_briefs import ko
+        self.store.update('message',note['id'],human_summary=('의존성 갱신 실패 2회. 기존 의존성 유지. 오류: ' if ko(goal) else 'Dependency update failed twice; previous dependencies retained. Errors: ')+details)
         self.release_answered_waits(self.store.get('goal',goal['id']))
 
     def checkpoint_decision(self,goal,item):

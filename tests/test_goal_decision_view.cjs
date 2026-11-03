@@ -49,3 +49,14 @@ console.log('PASS: decision titles, original preservation, timezone/DST, first-l
 })().catch(error=>{console.error(error);process.exitCode=1;});
 
 assert.equal(ctx.goalPlanCapacity([{status:"done"},{status:"superseded"},{status:"review"},{status:"blocked"}],{max_plan_items:40}),"활성 2 / 40 · 전체 4 (완료 포함)");
+
+// Observed failure details stay visible as text, never executable HTML.
+{
+ const made=[];const make=(tag,cls,text)=>{const node={tag,cls,textContent:text||'',children:[],append(...children){this.children.push(...children);}};made.push(node);return node;};
+ ctx.el=make;ctx.document={createTextNode:text=>({textContent:text})};
+ const card=make('article');const failure={task_id:'0123456789abcdef',stage:'workbench.goals.GoalManager.context',error:"KeyError: 'evidence_refs' <script>bad()</script>"};
+ const summary="KeyError: 'evidence_refs' · context · Task 0123456789abcdef";
+ ctx.renderHumanBrief(card,{language:'English',cause:'platform',summary,answer_helps:{value:'uncertain',reason:'Platform fix needed'},what_happened:[],failure});
+ assert(made.some(n=>n.tag==='pre'&&n.textContent===failure.error));assert(made.some(n=>n.textContent.includes(failure.task_id)&&n.textContent.includes(failure.stage)));
+ assert.equal(ctx.goalDecisionTitle({human_brief:{summary}}),summary);assert(!source.includes('failed.innerHTML'));
+}

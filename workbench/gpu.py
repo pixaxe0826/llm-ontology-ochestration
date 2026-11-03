@@ -12,7 +12,7 @@ import uuid
 import zipfile
 
 from .providers import error_message
-from .security import KEY_NAMES, contains_key, protected, redact, refresh_keys, scoped_path
+from .security import KEY_NAMES, secret_values, contains_key, protected, redact, refresh_keys, scoped_path
 from .workspace import Workspace
 from .gpu_launch import image_lines, classify_failure, startup_failure
 
@@ -111,7 +111,7 @@ class GPUManager:
                 if size > 100_000_000:
                     raise ValueError("파일 전송 한도 100 MB를 초과했습니다.")
                 content = file.read_bytes()
-                if any(os.environ.get(key) and os.environ[key].encode() in content for key in KEY_NAMES):
+                if any(value.encode() in content for value in secret_values() if value):
                     raise ValueError("등록된 키가 포함된 파일은 업로드할 수 없습니다.")
                 files[relative] = {"size": size, "sha256": hashlib.sha256(content).hexdigest()}
         if len(files) > 2000 or sum(info["size"] for info in files.values()) > 100_000_000:
@@ -218,7 +218,7 @@ class GPUManager:
                         raise ValueError("결과 파일 한도를 초과했습니다.")
                     target = scoped_path(artifacts, info.filename)
                     data = archive.read(info)
-                    if any(os.environ.get(key) and os.environ[key].encode() in data for key in KEY_NAMES):
+                    if any(value.encode() in data for value in secret_values() if value):
                         continue
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes(data)

@@ -14,7 +14,7 @@ async function loadMuseRoute(){renderMuseRoute(await api('/api/muse-open'));}
 async function renderMuseRouteSettings(){
   const value=await api('/api/muse-open');renderMuseRoute(value);
   const section=$('muse-route-settings');section.replaceChildren();
-  const heading=el('h3','','Muse Spark Open');heading.append(el('span','','Goal Planner · 제품 프록시'));section.append(heading);
+  const heading=el('h3','','Muse Spark Open');heading.append(el('span','','제품 프록시 기본 경로 · Goal 역할은 별도 설정'));section.append(heading);
   const form=el('div','muse-route-form');
   const routeLabel=el('label','','공급 경로');const route=el('select');route.id='muse-route-choice';route.append(new Option('Baseten','baseten'),new Option('Modal · 공유 엔드포인트','modal'));route.value=value.route;routeLabel.append(route);
   const capLabel=el('label','','플랫폼 Modal LLM 상한 · USD');const cap=el('input');cap.id='muse-modal-cap';cap.type='number';cap.min=0;cap.step='.01';cap.value=value.modal_llm_cap;capLabel.append(cap);
@@ -24,7 +24,7 @@ async function renderMuseRouteSettings(){
   const status=el('small','muse-route-info',value.modal_ready?'Proxy Token 설정됨':'MODAL_PROXY_TOKEN 필요');section.append(status);
   const actions=el('div','muse-route-actions');const discover=el('button','outline-button','엔드포인트 조회');discover.id='muse-endpoint-refresh';
   discover.addEventListener('click',handle(async()=>{discover.disabled=true;try{await api('/api/muse-open/models',{});await renderMuseRouteSettings();toast('엔드포인트 목록을 조회했습니다.');}finally{discover.disabled=false;}}));
-  const save=el('button','primary-button','경로 적용');save.id='muse-route-save';save.addEventListener('click',handle(async()=>{save.disabled=true;try{const result=await api('/api/muse-open',{route:route.value,endpoint_id:endpoint.value,modal_llm_cap:Number(cap.value)});renderMuseRoute(result);await renderMuseRouteSettings();toast('Goal Planner · 제품 프록시 경로를 적용했습니다.');}finally{save.disabled=false;}}));
+  const save=el('button','primary-button','경로 적용');save.id='muse-route-save';save.addEventListener('click',handle(async()=>{save.disabled=true;try{const result=await api('/api/muse-open',{route:route.value,endpoint_id:endpoint.value,modal_llm_cap:Number(cap.value)});renderMuseRoute(result);await renderMuseRouteSettings();toast('제품 프록시 기본 경로를 적용했습니다.');}finally{save.disabled=false;}}));
   actions.append(discover,save);section.append(actions);
   const toggle=()=>{endpoint.disabled=route.value!=='modal';};route.addEventListener('change',toggle);toggle();
 }

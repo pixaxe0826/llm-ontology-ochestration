@@ -36,6 +36,8 @@ def inbox_contract(rows):
         'For instruction/interrupt reopen completed items with human_actions[].item_actions only, never top-level dependency actions (which require answered decisions). '
         'Example: {"human_actions":[{"id":"DIRECTIVE_ID","status":"applied","items":[{"key":"existing-key","acceptance":[{"text":"Run the real model","kind":"execution"}]}],"item_actions":[{"item_id":"EXISTING_ITEM_ID","resolution":"rework","instruction":"Implement the new criteria. HUMAN ORIGINAL: <verbatim directive>"}],"instructions":[],"unapplied":[]}]}. '
         'Multiple items may be updated/reopened in the SAME action. Completed items may be reopened; history, evidence and commits remain. '
+        'Adding requirements or instructions to an ACTIVE item needs NO reopen: use instructions:[{"item_id":"ACTIVE_ITEM_ID","text":"New requirements. HUMAN ORIGINAL: <verbatim directive>"}]. '
+        'Acceptance/plan changes for active items are queued until the next inactive Builder chunk boundary. Do not reset their chunk counters or execution cycles. '
         'When the human asks to close/cancel/supersede an item, use item_actions:[{"item_id":"EXISTING_ID","resolution":"superseded","reason":"Why it is obsolete","superseded_by":"REPLACEMENT_ID_OR_NULL"}]. A closure ACK with no actual superseded action is invalid. Never claim closed/done without an applied action. '
         'For explicit human closure, items may instead contain {"key":"existing-key","status":"superseded","superseded_reason":"...","superseded_by":"replacement-key"}; no other status is valid in items. Superseded is terminal, not accepted, and cannot be reopened. '
         'No plan change is valid: items:[],instructions:[], with a truthful ACK explaining how the original direction informs subsequent work.')
@@ -63,7 +65,7 @@ class GoalInbox:
                 return self.detail(goal_id)
             target=data.get('plan_item_id') or None
             if target and not any(i['id']==target for i in self.items(goal_id)):raise ValueError('Choose an item in this Goal.')
-            if sum(r['state']=='pending' for r in self.directives(goal_id))>=20:raise ValueError('At most 20 unprocessed Goal messages are allowed.')
+            if sum(r['state'] in ('pending','queued','processing') for r in self.directives(goal_id))>=20:raise ValueError('At most 20 unprocessed Goal messages are allowed.')
             row=self.store.save('goal_directive',{'goal_id':goal_id,'kind':kind,'text':text.strip(),'plan_item_id':target,
                 'request_id':nonce,'state':'pending','created':time.time(),'cancel_gpu':data.get('cancel_gpu',False),'cancel_long':data.get('cancel_long',False),**self.times(goal)})
             message=self.message(goal,'Human','Planner',{'note':'NOTE','instruction':'INSTRUCTION','interrupt':'INTERRUPT'}[kind],text.strip(),target,[row['id']])
@@ -109,7 +111,11 @@ class GoalInbox:
         return True
 
     def builder_directions(self,goal,item):
-        return [{k:r[k] for k in ('id','kind','text','state')} for r in self.directives(goal['id']) if r['kind'] in ('instruction','interrupt') and r['state']!='rejected' and r.get('plan_item_id') in (None,item['id'])][-20:]
+        cutoff=None;chunk=getattr(self.builders.local,'chunk_id',None)
+        if chunk:
+            task=self.task_for_item(item)
+            cutoff=next((e['time'] for e in reversed((task or {}).get('events',[])) if e.get('kind')=='chunk_started' and e.get('chunk_id')==chunk),None)
+        return [{k:r[k] for k in ('id','kind','text','state')} for r in self.directives(goal['id']) if r['kind'] in ('instruction','interrupt') and r['state']!='rejected' and r.get('plan_item_id') in (None,item['id']) and (cutoff is None or r['created']<=cutoff)][-20:]
 
     def inbox_phase(self,goal,item,instruction,enabled=True):
         rows=[r for r in self.directives(goal['id']) if r['state']=='pending' and r['kind']!='interrupt'] if enabled else []
@@ -123,18 +129,22 @@ class GoalInbox:
         for original in rows:
             with self.lock:
                 row=self.store.get('goal_directive',original['id'])
-                if row['state'] not in ('pending','processing'):continue
+                if row['state'] not in ('pending','processing','queued'):continue
                 matches=[a for a in actions if isinstance(a,dict) and a.get('id')==row['id']]
                 action=matches[0] if len(matches)==1 else None
                 try:
                     if initial_error:raise ValueError(initial_error)
                     prepared=prepare_action(self,goal,row,action,prohibited)
+                    if prepared['defer_active']:
+                        from .inbox_deferred import queue
+                        queue(self,goal,row,prepared);continue
                     patch=prepared['patch'];parsed_actions=prepared['actions'];parsed=prepared['directions'];unmet=prepared['unmet']
                     before={r['id']:self.store.get('plan_item',r['id']) for r in patch['updates']}
                     self.apply_plan_patch(goal,patch,actor='Human via Planner',source=row['id'])
                     for identifier,resolution,text,reason,replacement in parsed_actions:self.apply_decision_action(goal,self.store.get('plan_item',identifier),resolution,text,row['id'],source_kind='directive',superseded_reason=reason,superseded_by=replacement)
                     for identifier,text in parsed:
-                        current=self.store.get('plan_item',identifier);self.store.update('plan_item',identifier,instruction=(current.get('instruction') or '')+'\n'+text)
+                        current=self.store.get('plan_item',identifier)
+                        if text not in (current.get('instruction') or ''):self.store.update('plan_item',identifier,instruction=(current.get('instruction') or '')+'\n'+text)
                     changed=list(dict.fromkeys([*[r['id'] for r in [*patch['updates'],*patch['creates']]],*[r[0] for r in parsed_actions]]))
                     audit=self.store.save('goal_inbox_attempt',{'goal_id':goal['id'],'directive_id':row['id'],'created':time.time(),
                         'state':'applied','before':before,'patch':patch,'item_instructions':action.get('instructions',[]),
@@ -171,7 +181,7 @@ class GoalInbox:
                 if isinstance(error,GoalLimit):raise
 
     def ack_directive(self,goal,row,state,changed,instructed,unmet,provided=None,evidence=None,diagnostic=None,server_only=False):
-        korean=ko(goal);labels={'applied':('반영됨','Applied'),'partial':('일부 반영','Partially applied'),'rejected':('거부','Rejected')}
+        korean=ko(goal);labels={'applied':('반영됨','Applied'),'partial':('일부 반영','Partially applied'),'rejected':('거부','Rejected'),'queued':('다음 묶음 대기','Queued for next chunk')}
         reasons={'publication_forbidden':('푸시·배포·게시 금지 규칙을 유지해야 합니다.','Push, deployment and publication remain forbidden.'),
             'secret_access_forbidden':('공급자 키를 읽거나 출력할 수 없습니다.','Provider secrets cannot be read or printed.'),
             'policy_bypass_forbidden':('승인·예산·보안 규칙을 우회할 수 없습니다.','Approval, spending and security controls cannot be bypassed.'),
@@ -185,6 +195,7 @@ class GoalInbox:
             (('변경 대상: '+(' · '.join(titles) or '계획 구조 변경 없음')+'.') if korean else 'Changed items: '+(' · '.join(titles) or 'no structural changes')+'.')]
         if readable:happened.append(('반영하지 못한 부분: ' if korean else 'Unapplied: ')+' '.join(readable))
         else:happened.append(('참고 메시지는 이번 Planner 입력에 포함됐습니다.' if row['kind']=='note' else '원문은 다음 해당 작업 입력에 보존되며 기존 승인·비용 규칙을 따릅니다.') if korean else ('The note was included in this Planner input.' if row['kind']=='note' else 'The original direction remains available to subsequent work under existing approval and spending rules.'))
+        if state=='queued':happened=[('실행 중인 묶음은 유지합니다. 지시 원문과 계획 변경은 보관했으며, 대상 Builder 묶음이 끝난 뒤 재검증하여 다음 묶음에 반영합니다. 카운터와 GPU 주기는 초기화하지 않습니다.' if korean else 'The active chunk continues. The original instruction and plan changes are saved for validation at its next inactive boundary. No chunk counters or GPU cycles are reset.')]
         brief={'language':'Korean' if korean else 'English','summary':('사람 지시 처리 — ' if korean else 'Human direction — ')+labels[state][0 if korean else 1],
             'what_happened':happened[:4],'cause':'platform' if diagnostic or 'restart_during_processing' in unmet else 'scope',
             'answer_helps':{'value':'uncertain' if unmet else 'yes','reason':('남은 조건은 상세 원문과 함께 확인해 주세요.' if unmet else '이 확인은 지시 반영 기록이며 작업 성공 판정은 별도 근거로 확인합니다.') if korean else ('Inspect the remaining conditions.' if unmet else 'This acknowledges the direction; execution success still requires observed evidence.')},
@@ -194,7 +205,7 @@ class GoalInbox:
             except (ValueError,TypeError,KeyError):pass
         brief['applied_items']=titles;brief['unapplied']=readable
         brief['cancellation_requests']=len(row.get('explicit_cancellations',[]))
-        self.store.update('goal_directive',row['id'],state=state,processed_at=time.time(),changed_items=changed,item_instructions=instructed,unapplied=unmet,diagnostic=diagnostic)
+        self.store.update('goal_directive',row['id'],state=state,**({'queued_at':time.time()} if state=='queued' else {'processed_at':time.time()}),changed_items=changed,item_instructions=instructed,unapplied=unmet,diagnostic=diagnostic)
         message=self.message(goal,'System' if server_only or diagnostic or state=='rejected' and not provided else 'Planner','Human','ACK',json.dumps({'directive_id':row['id'],'status':state,'changed_items':changed,'unapplied':unmet}),row.get('plan_item_id'),[row['id'],*(evidence or [])])
         self.store.update('message',message['id'],directive_id=row['id'],ack_status=state,human_brief=brief,human_display_language=goal.get('human_display_language','Korean'))
 
@@ -232,8 +243,12 @@ class GoalInbox:
         for row in self.store.items('goal_directive',None):
             if row['state']=='processing':self.ack_directive(self.store.get('goal',row['goal_id']),row,'partial',[],[],['restart_during_processing'],server_only=True)
 
+    def apply_deferred_directives(self,goal_id):
+        from .inbox_deferred import apply_pending
+        return apply_pending(self,goal_id)
+
     def close_pending_notes(self,goal):
         for row in self.directives(goal['id']):
             if row['kind']=='note' and row['state']=='pending':self.ack_directive(goal,row,'partial',[],[],['no_scheduled_planner_point'],server_only=True)
 
-    def pending_directions(self,goal_id):return any(r['state']=='pending' and r['kind']!='note' for r in self.directives(goal_id))
+    def pending_directions(self,goal_id):return any(r['state'] in ('pending','queued') and r['kind']!='note' for r in self.directives(goal_id))

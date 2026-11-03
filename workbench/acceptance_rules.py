@@ -9,10 +9,20 @@ EXECUTION_WORDS=re.compile(r'\b(run|runs|running|passed|passing|executed|executi
 
 
 def validate_rule(raw):
-    if not isinstance(raw,dict) or set(raw)-{'kind','doc_role','required_sections','required_keys','document_paths','format'}:raise ValueError('Invalid acceptance rule fields.')
+    if not isinstance(raw,dict) or set(raw)-{'kind','doc_role','required_sections','required_keys','document_paths','format','approval_paths'}:raise ValueError('Invalid acceptance rule fields.')
     kind=raw.get('kind')
-    if kind not in ('execution','document'):raise ValueError('Acceptance kind must be execution or document.')
+    if kind not in ('execution','document','human_approval'):raise ValueError('Acceptance kind must be execution, document or human_approval.')
     result={'kind':kind}
+    if kind=='human_approval':
+        paths=raw.get('approval_paths')
+        if not isinstance(paths,list) or not 1<=len(paths)<=20 or any(not isinstance(p,str) or not p or len(p)>500 for p in paths):raise ValueError('human_approval requires 1–20 approval_paths.')
+        for path in paths:
+            windows=PureWindowsPath(path)
+            if windows.is_absolute() or windows.drive or ':' in path or '\x00' in path or '..' in windows.parts or any(protected(p) for p in windows.parts):raise ValueError('Approval paths must be public workspace-relative files.')
+        paths=[PureWindowsPath(p).as_posix() for p in paths]
+        if len(set(paths))!=len(paths):raise ValueError('Duplicate approval paths.')
+        result['approval_paths']=paths
+    elif 'approval_paths' in raw:raise ValueError('approval_paths belong to human_approval criteria only.')
     if 'doc_role' in raw:
         if kind!='document' or raw['doc_role'] not in ROLES:raise ValueError('Document role must be results, reference, design or static on a document criterion.')
         result['doc_role']=raw['doc_role']
@@ -41,7 +51,7 @@ def normalize_criteria(criteria,rule_updates=None,previous=None):
     for value in criteria:
         if isinstance(value,str):text=value;rule=previous.get(text)
         elif isinstance(value,dict):
-            if set(value)-{'text','criterion','kind','doc_role','required_sections','required_keys','document_paths','format'}:raise ValueError('Invalid typed acceptance fields.')
+            if set(value)-{'text','criterion','kind','doc_role','required_sections','required_keys','document_paths','format','approval_paths'}:raise ValueError('Invalid typed acceptance fields.')
             text=value.get('text',value.get('criterion'));rule={k:v for k,v in value.items() if k not in ('text','criterion')}
         else:raise ValueError('Acceptance must be a string or typed criterion.')
         if not isinstance(text,str) or not text.strip() or len(text)>1500:raise ValueError('Observable acceptance text required.')
@@ -61,7 +71,7 @@ def rule_for(item,text):
 
 def needs_execution(item,text):
     rule=rule_for(item,text)
-    if rule['kind']=='document':return False
+    if rule['kind']!='execution':return False
     # Historical unclassified strings retain the exact pre-existing validation.
     return bool(EXECUTION_WORDS.search(text)) if rule.get('legacy') else True
 

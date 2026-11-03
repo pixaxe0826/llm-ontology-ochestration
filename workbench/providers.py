@@ -28,6 +28,26 @@ def selected_model(provider, model):
 class Providers:
     def __init__(self, store):
         self.store = store
+        from .provider_registry import ProviderRegistry
+        from .model_adapters import ModelAdapters
+        self.registry=ProviderRegistry(store)
+        self.adapters=ModelAdapters(self.registry,self.goal_client)
+
+    def goal_client(self,provider):
+        if provider in DEFAULTS or provider=='modal_llm':return self.client(provider)
+        from openai import OpenAI, DefaultHttpxClient
+        from .security import register_secret
+        value=self.registry.get(provider);refresh_keys();key=os.environ.get(value['credential_ref'])
+        if not key:raise ValueError('Provider key is not registered. Run scripts/set_provider_key.ps1 locally.')
+        register_secret(key)
+        return OpenAI(base_url=value['base_url'],api_key=key,max_retries=0,timeout=90,
+            http_client=DefaultHttpxClient(follow_redirects=False,trust_env=False,timeout=90))
+
+    def goal_complete(self,provider,messages,model,tools=None,max_tokens=8000,timeout_seconds=None,reasoning_effort=None):
+        return self.adapters.complete(provider,messages,model,tools,max_tokens,reasoning_effort,timeout_seconds or 90)
+
+    def goal_search(self,provider,query,model,max_tokens,reasoning_effort,timeout_seconds,instructions):
+        return self.adapters.search(provider,query,model,max_tokens,reasoning_effort,timeout_seconds,instructions)
 
     def settings(self):
         try:

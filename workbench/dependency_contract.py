@@ -25,6 +25,8 @@ def dependency_instruction(items, decisions):
         'A review requires observed evidence. Example of only reopening an item with unchanged dependencies: '
         '{"items":[],"actions":[{"key":"existing-key","resolution":"rework","instruction":"Complete the existing module and run pytest."}],"summary":"Human retry applied."}. '
         'Never invent key/decision IDs. Unrelated work must not depend on a checkpoint. '
+        'Copy full IDs/keys exactly from the catalog (never abbreviate or trim a final character). '
+        'Only use actions for items linked to an ANSWERED decision; Human instructions/interrupts use human_actions in the same response, not actions. '
         'Existing item keys and IDs: '+json.dumps(keys)+'\nCurrent decisions: '+json.dumps(decisions,ensure_ascii=False))
 
 

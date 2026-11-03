@@ -1,6 +1,6 @@
 'use strict';
 const goalInboxDrafts=new Map(),goalInboxSending=new Set();
-const inboxStatusLabels={pending:'대기',processing:'반영 중',applied:'반영됨',partial:'일부 반영',rejected:'거부'};
+const inboxStatusLabels={pending:'대기',queued:'다음 묶음 대기',processing:'반영 중',applied:'반영됨',partial:'일부 반영',rejected:'거부'};
 let inboxGoalId=null;
 function inboxDraft(id){if(!goalInboxDrafts.has(id))goalInboxDrafts.set(id,{kind:'note',target:'',text:'',cancel_gpu:false,cancel_long:false,request_id:null});return goalInboxDrafts.get(id);}
 function readInboxDraft(){
@@ -22,7 +22,7 @@ function renderGoalInbox(detail){
   const signature=JSON.stringify(items.map(i=>[i.id,i.title]));const select=$('goal-inbox-target');
   if(select.dataset.signature!==signature||switched){select.dataset.signature=signature;select.replaceChildren(new Option('Goal 전체',''));for(const item of items)select.append(new Option(item.title,item.id));select.value=draft.target;if(select.value!==draft.target){draft.target='';select.value='';}}
   if(switched){$('goal-inbox-kind').value=draft.kind;$('goal-inbox-text').value=draft.text;$('goal-inbox-cancel-gpu').checked=draft.cancel_gpu;$('goal-inbox-cancel-long').checked=draft.cancel_long;}
-  const pending=(detail.directives||[]).filter(d=>d.state==='pending'||d.state==='processing').length;
+  const pending=(detail.directives||[]).filter(d=>['pending','queued','processing'].includes(d.state)).length;
   $('goal-inbox-count').textContent=pending?'처리 대기 '+pending+'건':'';updateInboxComposer();
 }
 async function sendGoalInbox(){

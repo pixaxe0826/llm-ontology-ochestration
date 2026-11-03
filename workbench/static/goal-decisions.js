@@ -53,6 +53,7 @@ function renderHumanBrief(card,brief){
   const box=el('section','human-brief'),badges=el('div','human-brief-badges');
   badges.append(el('span','human-cause '+brief.cause,causes[brief.cause]||causes.scope),el('strong','human-answer-helps',word('답하면 해결되는가: ','Will answering resolve this? ')+({yes:word('예','Yes'),no:word('아니오','No'),uncertain:word('불확실','Uncertain')}[brief.answer_helps?.value]||word('불확실','Uncertain'))));
   box.append(badges,el('h4','human-brief-summary',brief.summary));
+  if(brief.failure){const f=brief.failure;const failed=el('section','human-failure');failed.append(el('strong','',word('실행 오류','Execution error')),el('p','','Task '+f.task_id+' · '+f.stage),el('pre','',f.error));box.append(failed);}
   box.append(el('p','human-resolution',brief.answer_helps?.reason||''));
   if(brief.cause==='platform')box.append(el('p','human-platform-notice',word('Codex 등에서 플랫폼 수정이 필요할 수 있음','A platform fix in Codex or a similar development tool may be needed.')));
   box.append(el('strong','',word('무슨 일이 있었나','What happened')));
@@ -82,6 +83,7 @@ function renderDecisionBody(card,d,detail){
   const {goal,items}=detail;
   const brief=d.human_brief;
   if(brief)renderHumanBrief(card,brief);
+  if(d.approval_files){const files=el('section','approval-files');files.append(el('strong','','승인 대상 파일 · SHA-256'));for(const [path,sha] of Object.entries(d.approval_files)){files.append(el('p','',path),el('code','',sha));}if(d.state==='pending')files.append(el('small','','파일이 바뀌면 새 승인이 필요합니다. 승인하려면 '+d.approval_option+' 선택 후 답변을 보내세요.'));card.append(files);}
   const raw=el('details','goal-decision-raw');raw.append(el('summary','',brief?.language==='English'?'Original details':'상세 원문'));card.append(raw);
   const question=el(decisionQuestionObject(d.question)?'pre':'p','goal-decision-question',d.question);raw.append(question);
   if(d.recommendation)raw.append(el('p','','추천: '+d.recommendation));

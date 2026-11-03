@@ -17,6 +17,7 @@ from .plan_capacity import PlanCapacityError,DEFAULT as DEFAULT_PLAN_LIMIT
 from .document_cycles import defects
 from .item_states import terminal
 from .goal_gpu import GPUArtifactEvidenceError,require_recovery
+from .human_approval import HumanApprovalError
 
 
 def execution_criterion(text):
@@ -49,6 +50,7 @@ class GoalReviews:
                     'decision_id':old.get('decision_action_source'),'created':time.time(),**self.times(goal)})
             changes.update({k:row[k] for k in ('depends_on','blocked_by_decision','priority','provisional_scope') if k in row})
             changes.update({k:row[k] for k in ('files_to_read','files_to_write','commands_to_run') if k in row})
+            if 'builder_route' in row:changes['builder_route']=row['builder_route']
             if old['status']=='done' and (old['acceptance']!=row['acceptance'] or old.get('acceptance_rules',{})!=row.get('acceptance_rules',{})):
                 changes.update(status='review',accepted_criteria={})
             self.store.update('plan_item',row['id'],**changes)
@@ -57,6 +59,7 @@ class GoalReviews:
                 'title':row['title'],'acceptance':row['acceptance'],'status':'todo','role':'Builder','attempts':0,'reworks':0,
                 'bundles':0,'evidence':[],'task_ids':[],'created':time.time()+index/100000,**self.times(goal)})
             self.store.update('plan_item',row['id'],**{k:row[k] for k in ('depends_on','blocked_by_decision','priority','provisional_scope','split_from','acceptance_rules','files_to_read','files_to_write','commands_to_run') if k in row})
+            if 'builder_route' in row:self.store.update('plan_item',row['id'],builder_route=row['builder_route'])
         for decision in self.pending_decisions(goal['id']):
             affected=set(decision['affected_items'])
             for row in [*patch['updates'],*patch['creates']]:
@@ -102,6 +105,8 @@ class GoalReviews:
             if name not in item['acceptance'] or name in seen:raise ValueError('Unknown or duplicate acceptance criterion.')
             seen.add(name)
             document=rule_for(item,name)['kind']=='document'
+            if value['decision']=='accept' and rule_for(item,name)['kind']=='human_approval' and (not isinstance(refs,list) or not refs or any(not isinstance(ref,str) or ref not in own_valid for ref in refs)):
+                raise HumanApprovalError(['Current human approval is missing or stale for '+', '.join(rule_for(item,name)['approval_paths'])+'. Request a fresh approving decision; do not rerun unrelated execution.'])
             if document and isinstance(refs,list):
                 add_spec_sources(self,goal,doc_sources,[r for r in refs if isinstance(r,str)])
                 doc_valid={key:ref for key,ref in doc_sources.items() if ref.get('supports_acceptance')}
@@ -114,7 +119,14 @@ class GoalReviews:
                 if document:raise DocumentEvidenceError(['Document acceptance requires current file read/write evidence.'])
                 raise ValueError('Acceptance requires valid observed evidence IDs. For unmet rework criteria use evidence_ids: [] or criteria: [].')
             if value['decision']=='accept' and needs_execution(item,name) and not any(own_valid[ref]['kind'] in EXECUTION_KINDS for ref in refs):
-                raise ValueError('Execution criteria require successful command or GPU evidence.')
+                available=[identifier for identifier,ref in own_valid.items() if ref['kind'] in EXECUTION_KINDS]
+                raise ValueError('Execution criteria require successful command or GPU evidence. Each execution criterion must individually cite execution evidence. '
+                    +'Criterion: '+json.dumps(name,ensure_ascii=False)+'; cited IDs: '+json.dumps(refs)
+                    +'; available successful execution IDs: '+json.dumps(available[:20])+'. '
+                    +('Add a relevant execution ID to THIS criterion alongside its file evidence; do not rerun an already successful command merely to change citations.' if available else 'No successful execution is available; use rework with concrete defects.'))
+            if value['decision']=='accept' and rule_for(item,name)['kind']=='human_approval':
+                from .human_approval import validate_criterion
+                validate_criterion(rule_for(item,name),refs,own_valid)
             if value['decision']=='accept' and document:
                 checked=validate_document(self,goal,item,name,rule_for(item,name),refs,doc_sources)
                 if not checked['passed']:raise DocumentEvidenceError(checked['defects'])
@@ -208,10 +220,10 @@ class GoalReviews:
                 self.store.update('goal_review_attempt',attempt['id'],response=redact(raw))
                 value=self.parse(raw);current=self.store.get('plan_item',item['id'])
                 try:accepted,valid,patch=self.validate_review(goal,current,value,review_only=review_only)
-                except (DocumentEvidenceError,GPUArtifactEvidenceError) as error:
+                except (DocumentEvidenceError,GPUArtifactEvidenceError,HumanApprovalError) as error:
                     # Bad document content is Builder rework, not a Planner JSON/platform failure.
-                    value={**value,'decision':'rework','defects':[{'kind':'execution' if isinstance(error,GPUArtifactEvidenceError) else 'document_fix','text':d} for d in error.defects],
-                        'criteria':[c for c in value.get('criteria',[]) if isinstance(c,dict) and c.get('criterion') in current['acceptance'] and rule_for(current,c['criterion'])['kind']!='document'],
+                    value={**value,'decision':'rework','defects':[{'kind':'execution' if isinstance(error,GPUArtifactEvidenceError) else 'other' if isinstance(error,HumanApprovalError) else 'document_fix','text':d} for d in error.defects],
+                        'criteria':[c for c in value.get('criteria',[]) if isinstance(c,dict) and c.get('criterion') in current['acceptance'] and rule_for(current,c['criterion'])['kind']=='execution'],
                         'goal_complete':False,'next_items':[],
                         'summary':'Document acceptance blocked by server checks: '+'; '.join(error.defects[:5])}
                     if current.get('review_trigger') in ('batch_limit','batch_limit_children_completed'):value['batch_action']='defer'
@@ -254,8 +266,9 @@ class GoalReviews:
                     self.store.update('plan_item',item['id'],status='waiting_children',wait_reason='children',waiting_resume='review',
                         reworks=reworks,defects=value['defects'],review_error=None,review_error_count=0,continue_pending=False,review_trigger=None)
                 elif review_only:
-                    self.store.update('plan_item',item['id'],status='blocked' if reworks>=3 else 'rework',reworks=reworks,
+                    self.store.update('plan_item',item['id'],status='blocked' if reworks>=3 or item.get('review_only_next') else 'rework',reworks=reworks,
                         defects=value['defects'],review_error=None,review_error_count=0,continue_pending=False,wait_reason=None,waiting_resume=None)
+                    if item.get('review_only_next'):self.message(goal,'Planner','Human','ESCALATE','Existing-evidence review found unmet criteria. Builder dispatch remains disabled as explicitly requested. '+value.get('summary',''),item['id'])
                 elif limit and value.get('batch_action')=='split' and reworks<3:
                     self.park_item(item,'split_children',resume='review',split_item_ids=[r['id'] for r in patch['creates']],
                         reworks=reworks,defects=value['defects'],review_error=None,review_error_count=0,continue_pending=False)

@@ -60,7 +60,7 @@ def concatenate(prefix,part):
 
 def complete_continuing(make_call,messages,tools=None,max_output_tokens=None):
     current=copy.deepcopy(messages)
-    text='';usages=[]
+    text='';usages=[];response_items=[]
     count=min(3,max(0,int(settings()['max_continuations'])))
     for attempt in range(count+1):
         response=make_call(current,tools)
@@ -70,12 +70,20 @@ def complete_continuing(make_call,messages,tools=None,max_output_tokens=None):
                            'completion_tokens':int(max_output_tokens or 8000),'usage_estimated':True})
         if not response.choices:break
         choice=response.choices[0];message=choice.message
-        text=concatenate(text,getattr(message,'content',None) or '')
+        extra=getattr(message,'model_extra',None) or {}
+        text=concatenate(text,extra.get('_muse_bridge_raw',getattr(message,'content',None) or ''))
+        items=extra.get('_muse_response_items') or []
+        # Truncated native calls are not executable; preserve the reasoning/text state only.
+        response_items.extend(copy.deepcopy(i) for i in items if choice.finish_reason!='length' or i.get('type')!='function_call')
         if choice.finish_reason!='length':break
         if attempt==count:break
-        current.append({'role':'assistant','content':text or '[The previous tool call was truncated before it could be executed.]'})
+        current.append({'role':'assistant','content':text or '[The previous tool call was truncated before it could be executed.]',
+            **({'_muse_response_items':[i for i in items if i.get('type')!='function_call']} if items else {})})
         current.append({'role':'user','content':CONTINUE})
-    if response.choices:response.choices[0].message.content=text
+    if response.choices:
+        message=response.choices[0].message;extra=getattr(message,'model_extra',None) or {}
+        if '_muse_bridge_raw' not in extra or response.choices[0].finish_reason=='length':message.content=text
+        if response_items:message.model_extra={**extra,'_muse_response_items':response_items}
     response.usage=TotalUsage(usages) if usages else None
     response._muse_usage_records=usages
     response._muse_continuations=attempt

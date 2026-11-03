@@ -1,6 +1,6 @@
 """Goal-local artifact recovery and optional human-cycle GPU submission caps."""
 import hashlib,os,shutil,time,uuid
-from .security import KEY_NAMES,redact
+from .security import KEY_NAMES,redact,secret_values
 from .workspace import Workspace
 from .goal_operations import gpu_cycle_limit
 
@@ -14,10 +14,19 @@ def require_recovery(manager,goal,item,valid,criteria):
     for identifier,ref in valid.items():
         if identifier not in selected or not ref.get('source_job_id'):continue
         if ref['kind'] not in ('copy_gpu_artifact','change'):continue
+        if ref['source_job_id'] in requirement.get('excluded_job_ids',[]):continue
+        if requirement.get('submitting_item_id') and ref.get('submitting_item_id')!=requirement['submitting_item_id']:continue
         groups.setdefault(ref['source_job_id'],set()).add((ref.get('source_artifact'),ref.get('path')))
     expected=set(requirement['paths'].items())
     if not any(expected<=paths for paths in groups.values()):
         raise GPUArtifactEvidenceError(['Missing current-input GPU recovery proofs for the full PNG/GLB set from one job; cite copied/verified-present evidence IDs for every required path.'])
+    if requirement.get('analysis_paths'):
+        analyzed={path for identifier,ref in valid.items() if identifier in selected and ref['kind']=='analyze_images' for path in ref.get('files',{})}
+        if not set(requirement['analysis_paths'])<=analyzed:raise GPUArtifactEvidenceError(['Missing current-image analyze_images evidence for the required new render paths.'])
+    if requirement.get('visual_request_after') is not None:
+        paths=list(requirement['paths'].values())
+        decisions=[d for d in manager.decisions(goal['id']) if item['id'] in d.get('affected_items',[]) and d['state'] in ('pending','answered') and d['created']>=requirement['visual_request_after']]
+        if not any(all(path in d.get('question','')+'\n'+d.get('reason','') for path in paths) for d in decisions):raise GPUArtifactEvidenceError(['A human visual approval request must present all new render paths; no such recorded request exists.'])
 
 
 def input_snapshot(manager,task,job):
@@ -133,7 +142,7 @@ def copy_artifact(manager,task,args):
     source=manager.gpu.artifact(job['id'],args['path'])
     if not source.is_file() or source.stat().st_size>32_000_000:raise ValueError('A local artifact copy is limited to 32 MB.')
     data=source.read_bytes();ws=Workspace(task['workspace'],manager.store.root);path=args['destination'];destination=ws.path(path)
-    def secret(content):return any(os.environ.get(k) and os.environ[k].encode() in content for k in KEY_NAMES)
+    def secret(content):return any(value.encode() in content for value in secret_values() if value)
     if secret(data):raise ValueError('Artifact contains protected credential content.')
     backup_id=None;sha=hashlib.sha256(data).hexdigest();existed=destination.exists()
     provenance={'gpu_job_id':job['id'],'source_job_id':job['id'],'submitting_item_id':owner['plan_item_id'],
@@ -142,12 +151,15 @@ def copy_artifact(manager,task,args):
         if not destination.is_file() or destination.stat().st_size>32_000_000:raise ValueError('Destination is not a supported file.')
         old=destination.read_bytes()
         if secret(old):raise ValueError('Destination contains protected credential content.')
-        if hashlib.sha256(old).hexdigest()==sha:
+        current_sha=hashlib.sha256(old).hexdigest()
+        if current_sha==sha:
             proof={'path':destination.relative_to(ws.root).as_posix(),'sha256':sha,'binary':True,'created':False,
                 'copied':False,'verified_present':True,'operation':'verified_present',**provenance}
             manager.store.event(task['id'],'gpu_artifact_copy',result=proof)
             return proof
-        if hashlib.sha256(old).hexdigest()!=args.get('expected_sha256'):raise ValueError('Existing destination requires its current expected_sha256; no file was overwritten.')
+        if current_sha!=args.get('expected_sha256'):
+            raise ValueError('Existing destination requires its current expected_sha256; destination '+destination.relative_to(ws.root).as_posix()+
+                ' current_sha256='+current_sha+'. Retry once with expected_sha256="'+current_sha+'"; no file was overwritten.')
         backup_id=uuid.uuid4().hex;backup=manager.store.root/'backups'/backup_id;backup.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(destination,backup)
     destination.parent.mkdir(parents=True,exist_ok=True);ws.path(path)
     temporary=destination.with_name(destination.name+'.muse-tmp-'+uuid.uuid4().hex[:8])

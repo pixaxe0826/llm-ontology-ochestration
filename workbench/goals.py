@@ -42,6 +42,8 @@ from .workspace import Workspace
 from .command_cwd import MISSING,normalize_cwd,with_cwd_notice
 from .goal_gpu import submission_status,check_submission,copy_artifact
 from .builder_failures import recover_failed_chunk
+from .builder_restarts import GoalBuilderRestarts,last_chunk,TERMINATED,paused_cancellation
+from .builder_errors import escalate_failure
 from .acceptance_rules import has_documents
 from .document_evidence import goal_sources
 from .review_evidence import packet
@@ -56,6 +58,8 @@ from .git_checkpoint import GoalCommits,enabled as auto_commit_enabled
 from .builder_productivity import GoalProductivity,read_limits
 from .code_map import CodeMap
 from .item_states import terminal
+from .goal_routing import GoalRouting
+from .provider_registry import ProviderRegistry
 
 LIVE = {'planning','running','waiting_approval','waiting_decision'}
 TASK_LIVE = {'running','queued','waiting_approval'}
@@ -70,6 +74,7 @@ REPORT_TOOL = tool('report_item','End this Builder chunk with progress or comple
 COPY_GPU_TOOL=tool('copy_gpu_artifact','Recover a downloaded GPU artifact from this item, its parent, children or siblings in the SAME Goal. Use for PNG/GLB. Equal destination bytes produce verified_present evidence without copying or requiring expected_sha256; replacing DIFFERENT bytes requires current expected_sha256. Proof includes submitting/copying item IDs and both hashes. No GPU execution, shell commands or provider credentials.',
     {'job_id':S,'path':S,'destination':S,'expected_sha256':S},['job_id','path','destination'])
 PLANNER_TOOLS=MEMORY_TOOLS+[
+    tool('model_routes','List registered provider/model capabilities and prices for role routing; no credentials or settings changes.',{'provider':S},[]),
     tool('read_file','Read workspace evidence only; optional 1-based inclusive start_line/end_line narrows large files. Legacy line_count is also accepted.',{'path':S,'start_line':{'type':'integer'},'end_line':{'type':'integer'},'line_count':{'type':'integer'}},['path']),
     tool('search_files','Search workspace evidence without modifying files.',{'query':S,'path':S},['query']),DECISION_TOOL]
 PLANNER_ALLOWED={t['function']['name'] for t in PLANNER_TOOLS}
@@ -117,7 +122,10 @@ class BuilderProviders:
         self.local = threading.local()
 
     def settings(self):
-        return self.manager.providers.settings()
+        result=dict(self.manager.providers.settings())
+        for provider in self.manager.model_registry.public()['providers']:
+            result.setdefault(provider['id'],{'ready':provider['ready'],'model':provider['models'][0]['id'] if provider['models'] else ''})
+        return result
 
     def completion(self,provider,messages,tools,model=None):
         task = self.manager.store.get('task',self.local.task_id)
@@ -137,8 +145,9 @@ class BuilderProviders:
         tail=[message for group in groups[-4:] for message in group]
         available=file_tools(tools)+MEMORY_TOOLS+[QUESTION_TOOL,DECISION_TOOL,REPORT_TOOL,COPY_GPU_TOOL]+REFERENCE_TOOLS+LONG_TOOLS
         if item.get('provisional_decisions'):
-            available=[t for t in available if t['function']['name'] in ('read_file','read_structured','list_files','search_files','code_map','edit_file','write_file','run_command','memory_search','memory_read','ask_planner','request_decision','report_item','check_long_command','cancel_long_command')]
-        return self.manager.call(goal,'meta','development','Builder',prefix+tail,available,goal['builder_model'],task_id=task['id'])
+            available=[t for t in available if t['function']['name'] in ('read_file','read_structured','list_files','search_files','code_map','file_hash','edit_file','write_file','run_command','memory_search','memory_read','ask_planner','request_decision','report_item','check_long_command','cancel_long_command')]
+        available=[t for t in available if not (t['function']['name']=='analyze_images' and self.manager.effective_routes(goal).get('ImageAnalysis') is None) and not (t['function']['name']=='reference_search' and self.manager.effective_routes(goal).get('ReferenceSearch') is None)]
+        return self.manager.call(goal,task.get('provider','meta'),'development','Builder',prefix+tail,available,task.get('model',goal['builder_model']),task_id=task['id'],role_route=task.get('model_route'))
 
 
 class GoalAgents(Agents):
@@ -147,6 +156,16 @@ class GoalAgents(Agents):
         super().__init__(manager.store,BuilderProviders(manager),manager.gpu,manager.memory)
         self.local = threading.local()
 
+    def _start(self,root,prompt,provider='meta',model=None,allow_write=True,max_steps=16,task_id=None,mode='work',use_memory=True,share_memory=True,context=None,attachments=None,conversation_id=None):
+        if task_id:
+            previous=self.store.get('task',task_id)
+            if context and (previous.get('goal_id')!=context.get('goal_id') or previous.get('plan_item_id')!=context.get('plan_item_id')):raise ValueError('Goal continuation must belong to the same Goal item.')
+            if previous['status'] in TERMINATED or (self.cancels.get(task_id) and self.cancels[task_id].is_set()):task_id=None
+            elif previous['status'] in ('succeeded','paused') and previous.get('error'):
+                self.store.event(task_id,'builder_continuation',previous_status=previous['status'],previous_error=redact(previous['error']))
+                self.store.update('task',task_id,error=None)
+        return super()._start(root,prompt,provider,model,allow_write,max_steps,task_id,mode,use_memory,share_memory,context,attachments,conversation_id)
+
     def _run(self,task_id):
         self.local.held=False
         self.local.chunk_id=uuid.uuid4().hex[:16]
@@ -154,6 +173,10 @@ class GoalAgents(Agents):
         self.providers.local.task_id=task_id
         self.store.update('task',task_id,status='queued',human_interrupt_ids=[],human_interrupt_chunk=None)
         self.store.event(task_id,'chunk_started',chunk_id=self.local.chunk_id,attempt_charged=bool(self.store.get('task',task_id).get('attempt_charged')))
+        retry=self.store.get('task',task_id).get('restart_retry_audit_id')
+        if retry:
+            audit=self.store.get('goal_restart_retry',retry)
+            if not audit.get('retry_chunk_id'):self.store.update('goal_restart_retry',retry,retry_task_id=task_id,retry_chunk_id=self.local.chunk_id,state='dispatched')
         try:
             self.acquire(task_id)
             super()._run(task_id)
@@ -272,6 +295,7 @@ class GoalAgents(Agents):
         if name in REFERENCE_NAMES:return self.manager.reference_tool(task,name,args)
         if name=='edit_file':return self.manager.edit_tool(task,args,getattr(self.local,'chunk_id',task_id))
         if name=='code_map':return self.manager.code_map_tool(task,args)
+        if name=='file_hash':return self.manager.file_hash_tool(task,args)
         if name in ('read_file','read_structured'):
             return self.manager.read_tool(task,name,args,getattr(self.local,'chunk_id',task_id))
         if name.startswith('memory_'):
@@ -306,12 +330,14 @@ class GoalAgents(Agents):
         return super().execute(task_id,name,args)
 
 
-class GoalManager(GoalSettings,GoalReviews,GoalFiles,GoalDecisions,GoalScheduler,DocumentCycles,GoalReferences,GoalOperations,GoalReferencePages,SAMProxy,GoalCommits,GoalProductivity,GoalPlanCapacity,HumanBriefs,GoalInbox):
+class GoalManager(GoalRouting,GoalBuilderRestarts,GoalSettings,GoalReviews,GoalFiles,GoalDecisions,GoalScheduler,DocumentCycles,GoalReferences,GoalOperations,GoalReferencePages,SAMProxy,GoalCommits,GoalProductivity,GoalPlanCapacity,HumanBriefs,GoalInbox):
     def __init__(self,store,providers,gpu,memory,prices=None):
         self.store,self.providers,self.gpu,self.memory=store,providers,gpu,memory
-        self.ledger=Ledger(store,prices)
+        self.model_registry=getattr(providers,'registry',None) or ProviderRegistry(store)
+        self.ledger=Ledger(store,prices,self.model_registry)
         self.code_mapper=CodeMap(store)
         self.muse_routes=MuseRoutes(store,providers,self.ledger)
+        self.bind_legacy_routes()
         self.builder_gate=threading.Lock()
         self.review_scope=threading.local()
         self.lock=threading.RLock()
@@ -387,9 +413,9 @@ class GoalManager(GoalSettings,GoalReviews,GoalFiles,GoalDecisions,GoalScheduler
         return {role:validate_reasoning(value.get(role,defaults[role])) for role in defaults}
 
     def set_reasoning(self,data):
-        values=self.reasoning_values(data.get('reasoning'))
         if data.get('goal_id'):
-            return self.update(data['goal_id'],{'reasoning':values})
+            return self.update(data['goal_id'],{'reasoning':data.get('reasoning')})
+        values=self.reasoning_values(data.get('reasoning'))
         self.store.save('settings',{'id':'goal_defaults','reasoning':values})
         return self.defaults()
 
@@ -405,10 +431,13 @@ class GoalManager(GoalSettings,GoalReviews,GoalFiles,GoalDecisions,GoalScheduler
             raise ValueError('Use a short output language name.')
         zone(timezone)
         model=validate_builder_model(data.get('builder_model',DEFAULT_BUILDER_MODEL))
+        routes=self.validate_routes(data['role_routes']) if 'role_routes' in data else None
+        role_efforts=self.reasoning_values(data.get('reasoning'))
+        if routes:role_efforts.update({role:route['reasoning_effort'] for role,route in routes.items() if role in role_efforts and route and route.get('reasoning_effort') in ('minimal','low','medium','high','xhigh')})
         now=time.time()
         goal=self.store.save('goal',{'title':title,'objective':objective,'workspace':str(ws.root),'status':'planning','created':now,
             'builder_model':model,'output_language':language,'human_display_language':display_language(data.get('human_display_language','Korean')),'timezone':timezone,'budgets':self.ledger.budgets(data.get('budgets')),
-            'reasoning':self.reasoning_values(data.get('reasoning')),
+            'reasoning':role_efforts,**({'role_routes':routes} if routes else {}),
             'allow_provisional':self.provisional_setting(data.get('allow_provisional',True)),
             'auto_commit':auto_commit_enabled(data.get('auto_commit',True)),
             'read_loop_limits':read_limits(data.get('read_loop_limits')),'max_plan_items':plan_limit(data.get('max_plan_items',DEFAULT_PLAN_LIMIT)),
@@ -437,7 +466,7 @@ class GoalManager(GoalSettings,GoalReviews,GoalFiles,GoalDecisions,GoalScheduler
             goal=self.store.get('goal',goal_id)
             directives=self.directives(goal_id);statuses={d['id']:d['state'] for d in directives}
             display_context={'decisions':self.decisions(goal_id),'summary':note_summary(self,goal)}
-            return {'goal':goal,'items':[{**i,**self.dependency_view(goal,i),**self.execution_view(goal,i)} for i in self.items(goal_id)],'messages':[{**self.human_message_view(goal,m,display_context),**({'directive_status':statuses.get(m['directive_id'])} if m.get('directive_id') else {})} for m in self.messages(goal_id)],'directives':directives,
+            return {'goal':goal,'effective_routes':self.effective_routes(goal),'items':[{**i,**self.dependency_view(goal,i),**self.execution_view(goal,i)} for i in self.items(goal_id)],'messages':[{**self.human_message_view(goal,m,display_context),**({'directive_status':statuses.get(m['directive_id'])} if m.get('directive_id') else {})} for m in self.messages(goal_id)],'directives':directives,
                     'decisions':self.decisions(goal_id),
                     'ledger':self.ledger.rows(goal_id),'costs':self.ledger.summary(goal),'approvals':self.approvals(goal_id),
                     'settings_history':self.settings_history(goal_id),'references':self.reference_usage(goal),'reference_pages':self.reference_page_usage(goal),
@@ -481,19 +510,27 @@ class GoalManager(GoalSettings,GoalReviews,GoalFiles,GoalDecisions,GoalScheduler
             self.message(goal,'System','Human','NOTE','Estimated spend warning: '+', '.join(sorted(fresh)))
         return row
 
-    def call(self,goal,provider,purpose,role,messages,tools=None,model=None,max_tokens=None,reasoning_effort=None,task_id=None,muse_target=None,proxy_metadata=None,plan_item_id=None,tool_options=None):
-        model=selected_model(provider,model) or goal['builder_model']
+    def call(self,goal,provider,purpose,role,messages,tools=None,model=None,max_tokens=None,reasoning_effort=None,task_id=None,muse_target=None,proxy_metadata=None,plan_item_id=None,tool_options=None,role_route=None):
         current_goal=self.store.get('goal',goal['id'])
-        requested_effort=reasoning_effort or current_goal.get('reasoning',{}).get(role) or self.providers.settings()[provider].get('reasoning_effort','high')
+        item_id=plan_item_id or (self.store.get('task',task_id).get('plan_item_id') if task_id else None)
+        registered=None
+        if purpose!='product':
+            item=self.store.get('plan_item',item_id) if item_id else None
+            registered=self.model_route(current_goal,role if role in ('Planner','Builder','ImageAnalysis','ReferenceSearch') else 'Builder',item,role_route)
+            if not current_goal.get('role_routes') and current_goal['id'] not in self.legacy_routes_by_goal and role=='Builder' and not (item or {}).get('builder_route') and role_route is None and model:
+                registered=self.model_route(current_goal,'Builder',override={'provider':provider,'model':model,'reasoning_effort':reasoning_effort or current_goal.get('reasoning',{}).get(role,'high')})
+            if muse_target and not current_goal.get('role_routes') and current_goal['id'] not in self.legacy_routes_by_goal:
+                registered=self.model_route(current_goal,role,override={'provider':muse_target['provider'],'model':muse_target['model'],'reasoning_effort':reasoning_effort or current_goal.get('reasoning',{}).get(role,'high')})
+        model=(model or goal['builder_model']) if registered else selected_model(provider,model) or goal['builder_model']
+        requested_effort=reasoning_effort or current_goal.get('reasoning',{}).get(role) or self.providers.settings().get(provider,{}).get('reasoning_effort','high')
         # Resolve once per logical request (including all length continuations).
-        target=(muse_target or self.muse_routes.target()) if provider=='baseten' and (role=='Planner' or purpose=='product') else None
+        target=registered or ((muse_target or self.muse_routes.target()) if provider=='baseten' and (role=='Planner' or purpose=='product') else None)
         actual_provider=target['provider'] if target else provider
         actual_model=target['model'] if target else model
         budget_provider=target['budget_provider'] if target else provider
         route=target['route'] if target else provider
-        selected_effort=reasoning(actual_provider,requested_effort)
-        limit=output_limit(actual_provider,role,actual_model,max_tokens,selected_effort)
-        item_id=plan_item_id or (self.store.get('task',task_id).get('plan_item_id') if task_id else None)
+        selected_effort=registered['reasoning_effort'] if registered else reasoning(actual_provider,requested_effort)
+        limit=self.route_limit(registered,role,max_tokens) if registered else output_limit(actual_provider,role,actual_model,max_tokens,selected_effort)
         def once(current,available):
             return self.model_retry(goal,actual_provider,lambda index,call_id:attempt(current,available,index,call_id),
                 role=role,task_id=task_id,item_id=item_id,purpose=purpose)
@@ -504,14 +541,16 @@ class GoalManager(GoalSettings,GoalReviews,GoalFiles,GoalDecisions,GoalScheduler
             if role=='Planner':current=self.limit_planner_evidence(current)
             vision_bound=VISION_INPUT_RESERVE if purpose=='product' and (proxy_metadata or {}).get('proxy_image_count') else None
             if vision_bound is not None and (available or tool_options):vision_bound+=len(json.dumps([available,tool_options],ensure_ascii=False).encode('utf-8'))
-            reservation=self.reserve(goal,budget_provider,purpose,self.ledger.estimate_call(budget_provider,actual_model,current,available,limit,input_token_bound=vision_bound),model=actual_model,role=role,reasoning_effort=selected_effort,task_id=task_id,plan_item_id=item_id,route=route,workload='llm',logical_model=model,retry_index=retry_index,model_call_id=call_id,**(proxy_metadata or {}))
+            reservation=self.reserve(goal,budget_provider,purpose,self.ledger.estimate_call(budget_provider,actual_model,current,available,limit,input_token_bound=vision_bound),model=actual_model,role=role,reasoning_effort=selected_effort,task_id=task_id,plan_item_id=item_id,route=route,workload='llm',logical_model=model,retry_index=retry_index,model_call_id=call_id,
+                **({'provider_id':actual_provider,'api_style':self.model_registry.get(actual_provider)['api_style'],'price_estimated':registered['price_estimated']} if registered else {}),**(proxy_metadata or {}))
             try:
-                response=self.providers.complete(actual_provider,current,actual_model,available,limit,timeout_seconds=goal['deadline_epoch']-time.time(),reasoning_effort=selected_effort,**({'role':'Product'} if purpose=='product' else {}),**({'tool_options':tool_options} if tool_options else {}))
+                response=(self.routed_complete(registered,current,available,limit,goal['deadline_epoch']-time.time()) if registered else
+                    self.providers.complete(actual_provider,current,actual_model,available,limit,timeout_seconds=goal['deadline_epoch']-time.time(),reasoning_effort=selected_effort,**({'role':'Product'} if purpose=='product' else {}),**({'tool_options':tool_options} if tool_options else {})))
                 raw_usage=getattr(response,'usage',None)
                 if purpose=='product' and raw_usage is not None:
                     raw_usage=raw_usage.model_dump() if callable(getattr(raw_usage,'model_dump',None)) else raw_usage
                     raw_usage=clean_data(raw_usage) if isinstance(raw_usage,dict) else None
-                self.ledger.settle(reservation,usage_of(response),**({'provider_usage':raw_usage} if purpose=='product' else {}))
+                self.ledger.settle(reservation,usage_of(response),response_model=getattr(response,'model',None) or actual_model,**({'provider_usage':raw_usage} if purpose=='product' else {}))
                 if actual_provider=='modal_llm':
                     try:self.ledger.check_modal_llm(self.store.get('goal',goal['id']))
                     except GoalLimit as error:
@@ -537,8 +576,9 @@ class GoalManager(GoalSettings,GoalReviews,GoalFiles,GoalDecisions,GoalScheduler
             'dependency_state':self.dependency_view(goal,i)['dependency_state']} for i in self.items(goal['id'])]
         recent=[{**{k:m[k] for k in ('from','to','type','body')},'evidence_refs':m.get('evidence_refs',m.get('evidence',[])) or []} for m in self.messages(goal['id']) if not m.get('directive_id')][-6:]
         for m in recent:m['body']=m['body'][-3000:]
-        compact_item=None if item is None else {k:v for k,v in item.items() if k in ('id','title','parent','acceptance','acceptance_rules','status','role','attempts','reworks','bundles','defects','report','instruction','rerun_instruction','rerun_requirement','depends_on','blocked_by_decision','provisional','provisional_decisions','wait_reason','review_trigger','split_item_ids','files_to_read','files_to_write','commands_to_run','stalled_chunks','document_cycle_active','document_cycles_used','document_cycle_paths','document_cycle_execution_criteria','gpu_artifact_requirement','superseded_by','superseded_reason')}
+        compact_item=None if item is None else {k:v for k,v in item.items() if k in ('id','title','parent','acceptance','acceptance_rules','status','role','attempts','reworks','bundles','defects','report','instruction','rerun_instruction','rerun_requirement','depends_on','blocked_by_decision','provisional','provisional_decisions','wait_reason','review_trigger','split_item_ids','files_to_read','files_to_write','commands_to_run','stalled_chunks','document_cycle_active','document_cycles_used','document_cycle_paths','document_cycle_execution_criteria','gpu_artifact_requirement','superseded_by','superseded_reason','builder_route','pending_builder_route')}
         if compact_item is not None:compact_item['bundle_limit']=self.bundle_limit(item)
+        if compact_item is not None:compact_item['model_routes']=self.effective_routes(goal)
         if compact_item is not None and role=='Builder':compact_item['reference_search']=self.reference_usage(goal,item)
         if compact_item is not None and role=='Builder':compact_item['reference_pages']=self.reference_page_usage(goal,item)
         if compact_item is not None and role=='Builder':compact_item['long_commands']=[{k:v for k,v in self.long_commands.view(row).items() if k in ('id','label','status','elapsed_s','evidence_id','proxy_cost')} for row in self.long_commands.rows(goal['id'])[:8]]
@@ -567,6 +607,8 @@ class GoalManager(GoalSettings,GoalReviews,GoalFiles,GoalDecisions,GoalScheduler
             catalog=packet(refs,limit=8000,preferred=list(accounting.values()))
             messages.insert(-1,{'role':'user','content':'DOCUMENT SOURCE CATALOG (same Goal; cite IDs, not assistant claims)\n'+dumped(catalog)})
         if role=='Planner':
+            catalog=self.route_catalog()
+            messages.insert(-1,{'role':'user','content':'REGISTERED MODEL ROUTES (use model_routes to inspect a provider if omitted)\n'+dumped(catalog[:80])})
             active=[{k:r[k] for k in ('id','kind','text','plan_item_id')} for r in self.directives(goal['id']) if r['kind']!='note' and r['state'] in ('applied','partial')][-20:]
             if active:messages.insert(-1,{'role':'user','content':'ACKNOWLEDGED HUMAN DIRECTIONS (never policy bypass)\n'+dumped(active)})
         return messages
@@ -591,6 +633,7 @@ class GoalManager(GoalSettings,GoalReviews,GoalFiles,GoalDecisions,GoalScheduler
 
     def planner_tool(self,goal,item,name,args):
         if name not in PLANNER_ALLOWED:raise PermissionError('Planner tool forbidden: '+name)
+        if name=='model_routes':return self.route_catalog(args.get('provider'))
         if name=='request_decision' and getattr(self.review_scope,'read_only',False):raise PermissionError('Review-only cannot create human decisions. Return accept/rework from existing observations.')
         if name.startswith('memory_'):return self.memory_tool(goal,'Planner',name,args)
         if name=='request_decision':return self.request_decision(goal,item,args,'Planner')
@@ -634,13 +677,14 @@ class GoalManager(GoalSettings,GoalReviews,GoalFiles,GoalDecisions,GoalScheduler
 
     def _phase(self,goal,item,instruction):
         messages=self.context(goal,item,'Planner')+[{'role':'user','content':instruction}]
-        target=self.muse_routes.target(generation_settings().get('capabilities',{}))
-        native=target['tools_supported']
+        registered=self.model_route(goal,'Planner',item)
+        target=self.muse_routes.target(generation_settings().get('capabilities',{})) if not goal.get('role_routes') and goal['id'] not in self.legacy_routes_by_goal else None
+        native=target['tools_supported'] if target else registered['capabilities']['tool_calling']
         if not native:messages.append({'role':'user','content':'Native tools unavailable. For evidence or a human decision, return {"tool_requests":[{"name":"read_file","arguments":{"path":"..."}}]} instead of the final JSON. Only the supplied orchestration/read-only/memory tool names are allowed.'})
         for round_index in range(4):
             # One format-correction round must not consume the existing evidence-tool budget.
             if round_index==3 and not self.review_scope.human_brief_retries:break
-            response=self.call(goal,'baseten','development','Planner',messages,PLANNER_TOOLS if native else None,BASETEN_MODEL,muse_target=target,plan_item_id=item['id'] if item else None)
+            response=self.call(goal,registered['provider'],'development','Planner',messages,PLANNER_TOOLS if native else None,registered['model'],muse_target=target,plan_item_id=item['id'] if item else None,role_route=None if target else registered)
             if not response.choices:raise ValueError('Planner returned no choice.')
             value=response.choices[0].message
             content=getattr(value,'content',None) or ''
@@ -661,7 +705,9 @@ class GoalManager(GoalSettings,GoalReviews,GoalFiles,GoalDecisions,GoalScheduler
                 messages[-1]={'role':'user','content':'RECENT OBSERVED TOOL RESULTS\n'+dumped(observed)}
                 continue
             if len(calls)>3:raise ValueError('Planner requested too many memory tools.')
-            messages.append({'role':'assistant','content':content, 'tool_calls':[{'id':c.id,'type':'function','function':{'name':c.function.name,'arguments':c.function.arguments}} for c in calls]})
+            extra=getattr(value,'model_extra',None) or {}
+            messages.append({'role':'assistant','content':content, 'tool_calls':[{'id':c.id,'type':'function','function':{'name':c.function.name,'arguments':c.function.arguments}} for c in calls],
+                **{k:extra[k] for k in ('reasoning_content','_muse_response_items') if extra.get(k) is not None}})
             for call in calls:
                 try:result=self.planner_tool(goal,item,call.function.name,json.loads(call.function.arguments))
                 except (ValueError,PermissionError,OSError) as error:result={'error':redact(str(error))}
@@ -730,8 +776,11 @@ class GoalManager(GoalSettings,GoalReviews,GoalFiles,GoalDecisions,GoalScheduler
     def assign(self,goal,item,continuation=False):
         with self.lock:
             goal=self.guard(goal['id'],goal['generation'])
+            self.apply_deferred_directives(goal['id'])
+            self.apply_item_routes(goal['id'])
             item=self.store.get('plan_item',item['id']);view=self.dependency_view(goal,item)
             if terminal(item):return
+            if item.get('review_only_next'):return
             if self.child_items(goal,item):return
             if not view['ready'] or item.get('needs_decision_replan'):return
             if item['bundles']>=self.bundle_limit(item):self.prepare_limit_review(goal,item);return
@@ -744,15 +793,20 @@ class GoalManager(GoalSettings,GoalReviews,GoalFiles,GoalDecisions,GoalScheduler
                 'instruction':item.get('instruction') or item.get('rerun_instruction') or ('Continue this same item using the prior chunk summary, read history and observed results. End with report_item(progress or completed).' if continuation else 'Implement and verify this item. End with report_item(progress or completed), including NOT RUN / NOT VERIFIED limits.')})
             self.message(goal,'Planner','Builder','ASSIGN',text,item['id'])
             previous=self.task_for_item(item)
+            resolved=self.model_route(goal,'Builder',item)
+            previous_id=previous['id'] if previous else self.store.get('goal_restart_retry',item['restart_retry_pending'])['source_task_id'] if item.get('restart_retry_pending') else item.get('previous_builder_task_id')
             # Across server generations use a fresh tool history plus preserved carryover.
-            resume_id=previous['id'] if continuation and previous and previous.get('generation')==goal['generation'] else None
-            task=self.builders.start(goal['workspace'],text,provider='meta',model=goal['builder_model'],max_steps=goal['max_steps'],
+            same_route=not previous or previous.get('provider','meta')==resolved['provider'] and previous.get('model',goal['builder_model'])==resolved['model']
+            if previous and (previous.get('model_route') or {}).get('provider_revision',0)!=resolved['provider_revision']:same_route=False
+            resume_id=previous['id'] if continuation and same_route and self.reusable_builder(goal,item,previous) and not item.get('restart_retry_pending') else None
+            task=self.builders.start(goal['workspace'],text,provider=resolved['provider'],model=resolved['model'],max_steps=goal['max_steps'],
                 task_id=resume_id,use_memory=False,share_memory=False,
                 context={'goal_id':goal['id'],'plan_item_id':item['id'],'generation':goal['generation'],
                     'decision_revision':item.get('decision_revision',0),'execution_cycle':item.get('execution_cycle',0),
-                    'attempt_charged':not continuation,'system_prompt':system(goal,'Builder')})
+                    'attempt_charged':not continuation,'system_prompt':system(goal,'Builder'),
+                    'previous_task_id':previous_id,'restart_retry_audit_id':item.get('restart_retry_pending'),'model_route':resolved})
             self.store.update('plan_item',item['id'],task_id=task['id'],task_ids=list(dict.fromkeys([*item['task_ids'],task['id']])),
-                bundles=item['bundles']+1,attempts=item['attempts']+(0 if continuation else 1),continue_pending=False)
+                bundles=item['bundles']+1,attempts=item['attempts']+(0 if continuation else 1),continue_pending=False,restart_retry_pending=None)
 
     def finished_batch(self,goal,item,task):
         evidence,fresh=self.collect_evidence(item,task)
@@ -763,12 +817,13 @@ class GoalManager(GoalSettings,GoalReviews,GoalFiles,GoalDecisions,GoalScheduler
         if task.get('human_interrupt_ids'):
             self.park_item(item,'continuation',resume='continue',bundle_reported=item['bundles'],report=report,continue_pending=True)
             return
+        if self.retry_restart_chunk(goal,item,task):return
         waiting_long=bool(self.long_commands.active(goal['id'],item['id']))
         self.save(latest,no_progress=0 if fresh else latest['no_progress'] if waiting_long else latest['no_progress']+1)
-        if task['status']=='failed':
+        if task['status'] in TERMINATED:
             recover_failed_chunk(self,goal,item,task);item=self.store.get('plan_item',item['id'])
             self.park_item(item,'platform_error',resume=None,bundle_reported=item['bundles'],report=report,continue_pending=False)
-            self.message(goal,'System','Human','ESCALATE','Builder execution failed. Inspect the observed error before retrying; independent items may continue.',item['id'])
+            escalate_failure(self,goal,item,task)
         elif self.long_commands.active(goal['id'],item['id']):
             self.park_item(item,'long_command',resume='continue',bundle_reported=item['bundles'],report=report,continue_pending=False)
         elif not item.get('document_cycle_active') and (declared['status']!='completed' or any(needs_execution(item,c) for c in item['acceptance']) and not any(e.get('supports_acceptance') and e['kind'] in ('run_command','submit_gpu_job','get_gpu_job') for e in evidence)) and self.handle_stalled_batch(goal,item,task):
@@ -858,6 +913,10 @@ class GoalManager(GoalSettings,GoalReviews,GoalFiles,GoalDecisions,GoalScheduler
                 self.apply_pending_settings(goal_id);goal=self.store.get('goal',goal_id)
                 if time.time()>=goal['deadline_epoch']:raise ValueError('Update the UTC deadline before resuming.')
                 for item in self.items(goal_id):
+                    previous=self.task_for_item(item)
+                    if not terminal(item) and previous and paused_cancellation(previous):
+                        self.store.update('plan_item',item['id'],task_id=None,previous_builder_task_id=previous['id'],status='todo',wait_reason=None,waiting_resume=None,continue_pending=item['bundles']<self.bundle_limit(item),bundle_reported=item['bundles'])
+                        continue
                     if item['status']=='in_progress' or item['status']=='waiting' and item.get('waiting_resume')=='active_task':
                         self.park_item(item,'interrupted',resume='continue' if item['bundles']<self.bundle_limit(item) else 'review',continue_pending=item['bundles']<self.bundle_limit(item))
                 self.save(goal,status='running' if self.items(goal_id) else 'planning',generation=goal['generation']+1,reason='',no_progress=0,pause_origin=None,scheduling_blocked=False)
@@ -907,6 +966,8 @@ class GoalManager(GoalSettings,GoalReviews,GoalFiles,GoalDecisions,GoalScheduler
         try:
             while not self.signals[goal_id].wait(.15):
                 self.apply_pending_settings(goal_id)
+                self.apply_deferred_directives(goal_id)
+                self.apply_item_routes(goal_id)
                 goal=self.guard(goal_id)
                 if self.process_interrupts(goal):continue
                 if not self.items(goal_id):self.plan(goal);continue
@@ -940,7 +1001,7 @@ class GoalManager(GoalSettings,GoalReviews,GoalFiles,GoalDecisions,GoalScheduler
                         self.assign(goal,pinned,True)
                         continue
                 for item in self.items(goal_id):
-                    if self.review_ready(item) and self.dependency_view(goal,item)['ready'] and not item.get('needs_decision_replan'):self.review(self.guard(goal_id),item)
+                    if self.review_ready(item) and self.dependency_view(goal,item)['ready'] and not item.get('needs_decision_replan'):self.review(self.guard(goal_id),item,review_only=bool(item.get('review_only_next')))
                     if self.store.get('goal',goal_id)['status'] not in LIVE:return
                 goal=self.guard(goal_id)
                 if goal['no_progress']>=3:
@@ -995,6 +1056,9 @@ class GoalManager(GoalSettings,GoalReviews,GoalFiles,GoalDecisions,GoalScheduler
             with self.lock:
                 goal=self.store.get('goal',goal['id'])
                 if goal['status'] in LIVE:
+                    for task_id in list(self.builders.active):
+                        task=self.store.get('task',task_id)
+                        if task.get('goal_id')==goal['id']:self.store.update('task',task_id,restart_interruption={'kind':'server_restart','created':time.time(),'generation':goal['generation']})
                     self.control(goal['id'],'pause',reason='Server is shutting down.')
                     self.save(goal,status='interrupted',reason='Server restarted. Resume explicitly to continue.')
                     self.remember_restart(goal)
